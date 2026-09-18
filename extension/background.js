@@ -1014,6 +1014,11 @@ async function cmdClick(params) {
 				return res.result.value;
 			});
 			if (!synthetic) throw new Error(`element not found: ${params.selector}`);
+			// Verifying the outcome here is what turns "I clicked something" into
+			// "the click had this effect" — one round trip instead of a follow-up
+			// screenshot. Absent for a DOM click is hit-testing, which never had
+			// a chance to run; `expect` is the substitute that was actually earned.
+			const expected = params.expect ? await runExpectation(send, params.expect) : undefined;
 			return {
 				tabId: tab.id,
 				clicked: synthetic,
@@ -1022,6 +1027,7 @@ async function cmdClick(params) {
 				hitVerified: false,
 				inputDegraded: 'dom-synthetic',
 				degradedReason: 'focusPolicy=preserve: dispatched a DOM click instead of a trusted mouse event (isTrusted is false; overlays are not hit-tested). Set focusPolicy=steal to force real input.',
+				...(expected === undefined ? {} : { expected }),
 				dialogsAnswered: dialogLog.filter((d) => d.tabId === tab.id && Date.now() - d.t < 5000).length,
 			};
 		});
@@ -1055,11 +1061,13 @@ async function cmdClick(params) {
 		await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: hit.x, y: hit.y });
 		await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: hit.x, y: hit.y, button: 'left', clickCount });
 		await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hit.x, y: hit.y, button: 'left', clickCount });
+		const expected = params.expect ? await runExpectation(send, params.expect) : undefined;
 		return {
 			tabId: tab.id,
 			clicked: { x: hit.x, y: hit.y, tag: hit.tag, text: hit.text },
 			hitVerified: hit.isTop,
 			...(hit.isTop ? {} : { hitInstead: hit.hitTag }),
+			...(expected === undefined ? {} : { expected }),
 			dialogsAnswered: dialogLog.filter((d) => d.tabId === tab.id && Date.now() - d.t < 5000).length,
 		};
 	});
@@ -1120,7 +1128,10 @@ async function cmdInput(params) {
 	if (!located) throw new Error(`element not found: ${params.selector}`);
 
 	if (mode === 'fill') {
-		const result = await withCDP(tab.id, (send) => send('Runtime.evaluate', {
+		// One withCDP scope for both the fill and the optional expectation: they
+		// share the same sender, so no second attach and no extra round trip.
+		const filled = await withCDP(tab.id, async (send) => {
+		const result = await send('Runtime.evaluate', {
 			expression: `(() => {
 				const el = document.querySelector(${JSON.stringify(String(params.selector))});
 				const value = ${JSON.stringify(String(params.value))};
@@ -1146,7 +1157,11 @@ async function cmdInput(params) {
 		}).then((res) => {
 			if (res.exceptionDetails) throw new Error(res.exceptionDetails.text);
 			return res.result.value;
-		}));
+		});
+		// `fill` already reads the value back; `expect` lets the caller assert a
+		// DIFFERENT post-condition (a validation error appearing, a submit button
+		// enabling) without a second round trip.
+		const expected = params.expect ? await runExpectation(send, params.expect) : undefined;
 		return {
 			tabId: tab.id,
 			mode,
@@ -1155,7 +1170,10 @@ async function cmdInput(params) {
 				inputDegraded,
 				degradedReason: "focusPolicy=preserve: 'type' mode needs OS focus, so the value was set directly (fill). Keystroke-level handlers did not run. Set focusPolicy=steal to force real typing.",
 			}),
+			...(expected === undefined ? {} : { expected }),
 		};
+		});
+		return filled;
 	}
 
 	// 'type' mode: per-character real key events. dispatchKeyEvent with the
@@ -1195,7 +1213,8 @@ async function cmdInput(params) {
 			})()`,
 			awaitPromise: false, returnByValue: true, userGesture: true,
 		}).then((res) => res.result.value);
-		return { tabId: tab.id, mode, filled: readBack };
+		const expected = params.expect ? await runExpectation(send, params.expect) : undefined;
+		return { tabId: tab.id, mode, filled: readBack, ...(expected === undefined ? {} : { expected }) };
 	});
 }
 
@@ -1245,12 +1264,14 @@ async function cmdPress(params) {
 				return res.result.value;
 			});
 			if (!synthetic) throw new Error('no active element to receive the key');
+			const expected = params.expect ? await runExpectation(send, params.expect) : undefined;
 			return {
 				tabId: tab.id, key,
 				receivedBy: synthetic.target,
 				...(synthetic.submitted ? { formSubmitted: true } : {}),
 				inputDegraded: 'dom-synthetic',
 				degradedReason: 'focusPolicy=preserve: dispatched an untrusted KeyboardEvent in-page instead of a real key event (isTrusted is false; browser-level shortcuts do not fire). Set focusPolicy=steal to force real input.',
+				...(expected === undefined ? {} : { expected }),
 			};
 		});
 	}
@@ -1276,7 +1297,8 @@ async function cmdPress(params) {
 			await send('Input.dispatchKeyEvent', { type: 'char', key, text, unmodifiedText: text, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode, code, modifiers });
 		}
 		await send('Input.dispatchKeyEvent', { type: 'keyUp', key, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode, code, modifiers });
-		return { tabId: tab.id, key };
+		const expected = params.expect ? await runExpectation(send, params.expect) : undefined;
+		return { tabId: tab.id, key, ...(expected === undefined ? {} : { expected }) };
 	});
 }
 
@@ -1408,6 +1430,57 @@ const COMMANDS = {
  * a string, or a predicate function returns truthy. Polls inside the page via
  * requestAnimationFrame-ish loop (50ms interval) — no bridge round-trips.
  */
+/**
+ * Poll the page until an expected post-condition holds, as part of the action
+ * that produced it. This is the "check" half of ASIL's semantic action: the
+ * caller states the outcome it wants, and gets one verdict back instead of
+ * having to issue a separate screenshot-or-query round trip to find out.
+ *
+ * Runs in-page on a 50ms cadence so no bridge round trips are spent polling.
+ * @param send - the CDP send bound to the acting tab.
+ * @param spec - {kind:'selector'|'text'|'gone'|'value', ...} plus timeoutMs.
+ * @returns {matched, waitedMs, detail} — never throws on timeout; a miss is a
+ *   normal answer, so the caller can report an honest partial result.
+ */
+async function runExpectation(send, spec) {
+	const timeoutMs = Math.min(120_000, Math.max(50, Number(spec.timeoutMs) || 5000));
+	let condition;
+	let describe;
+	if (typeof spec.selector === 'string' && spec.selector.length > 0) {
+		condition = `!!document.querySelector(${JSON.stringify(spec.selector)})`;
+		describe = `selector ${spec.selector}`;
+	} else if (typeof spec.text === 'string') {
+		condition = `(document.body && document.body.innerText.includes(${JSON.stringify(spec.text)}))`;
+		describe = `text "${spec.text}"`;
+	} else if (typeof spec.gone === 'string') {
+		condition = `!(document.body && document.body.innerText.includes(${JSON.stringify(spec.gone)}))`;
+		describe = `absence of "${spec.gone}"`;
+	} else if (typeof spec.value === 'string' && typeof spec.target === 'string') {
+		const target = JSON.stringify(spec.target);
+		condition = `(() => { const el = document.querySelector(${target}); return !!el && String(el.value ?? el.textContent ?? '') === ${JSON.stringify(spec.value)}; })()`;
+		describe = `value of ${spec.target}`;
+	} else {
+		throw new Error('expect requires one of: selector, text, gone (with optional target+value)');
+	}
+	const started = Date.now();
+	for (;;) {
+		const res = await send('Runtime.evaluate', {
+			expression: condition, awaitPromise: false, returnByValue: true, userGesture: true,
+		}).catch(() => ({ result: { value: false } }));
+		if (res.result && res.result.value === true) {
+			return { matched: true, waitedMs: Date.now() - started, detail: describe };
+		}
+		if (Date.now() - started >= timeoutMs) {
+			// A timeout is an ANSWER, not an error: the action may still have
+			// worked and simply be slow, so the caller reports matched:false and
+			// decides what to do rather than receiving an exception it cannot
+			// distinguish from a hard failure.
+			return { matched: false, waitedMs: Date.now() - started, detail: describe, timedOut: true };
+		}
+		await new Promise((r) => setTimeout(r, 50));
+	}
+}
+
 async function cmdWait(params) {
 	const tab = await resolveTab(params.tabId);
 	const timeoutMs = Math.min(120_000, Math.max(100, Number(params.timeoutMs) || 15_000));

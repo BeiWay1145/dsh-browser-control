@@ -233,6 +233,18 @@ function targetSelector(args: { selector?: string; ref?: string }): string {
  * @param value - the raw payload from the `tabs.list` command.
  * @returns one line per tab plus an exact count when the preview is capped.
  */
+/**
+ * Shared `expect` parameter description for the acting tools. One call that
+ * states its own success condition replaces the usual "act, then screenshot,
+ * then guess" cycle — a screenshot costs 713ms, and is the single slowest tool.
+ */
+const EXPECT_PARAM_DESCRIPTION = 'Optional post-condition verified in the SAME call, so you do not need a follow-up '
+	+ 'screenshot or query to learn whether the action worked. Give exactly one of: '
+	+ '{selector} (element appears), {text} (page text appears), {gone} (page text disappears), '
+	+ 'or {target, value} (an element reaches an exact value). Optional {timeoutMs} (default 5000, max 120000). '
+	+ 'The result reports expected.matched — a miss is a normal answer, not an error, so false means '
+	+ '"not observed yet", not "the call failed".'
+
 const TABS_PREVIEW_LIMIT = 25
 
 function summarizeTabs(value: Record<string, JsonValue>): string {
@@ -373,7 +385,25 @@ function applyBrowserTools(ctx: Context, controller: BridgeController): void {
 			+ 'restricted_other_extension or restricted_browser_internal. Listing, opening, '
 			+ 'closing and navigating them still work, and their url and title stay readable — '
 			+ 'only in-page access is blocked. When a task needs one, stop and hand that single '
-			+ 'step to the user with a concrete instruction, then carry on with the rest.',
+			+ 'step to the user with a concrete instruction, then carry on with the rest.\n\n'
+			+ 'PICK THE CHEAPEST WAY TO OBSERVE. Measured on real pages, the cost spread is '
+			+ 'roughly 200x between strategies, so escalate a level only when the one above '
+			+ 'genuinely cannot answer: (1) browser_evaluate reading exactly the fields you '
+			+ 'need — ~30 bytes, single-digit ms; (2) browser_read for the page as text — '
+			+ 'kilobytes; (3) browser_snapshot then browser_click by ref — one round trip for '
+			+ 'the interactive map, and prefer it over guessing CSS selectors; (4) '
+			+ 'browser_screenshot LAST — it is the slowest tool (~700ms) and returns a file '
+			+ 'path you must then open. browser_read(mode:"html") is almost always a mistake: '
+			+ 'it returned 126KB where an evaluate of the same page returned 33 bytes, and it '
+			+ 'rarely contains anything evaluate cannot reach. Reads and evaluation never '
+			+ 'disturb the user; prefer them over acting whenever reading suffices.\n\n'
+			+ 'STATE THE OUTCOME INSTEAD OF CHECKING LATER: browser_click, browser_type and '
+			+ 'browser_press accept an optional expect ({selector}|{text}|{gone}|{target,value}) '
+			+ 'that is verified inside the same call and reported as expected.matched. Use it '
+			+ 'whenever you would otherwise take a screenshot or issue a separate evaluate to '
+			+ 'find out whether the action landed. A false expected.matched means "not observed '
+			+ 'within the timeout", not "the call failed" — decide from it rather than retrying '
+			+ 'blindly.',
 	})
 
 	ctx.tools.register(defineTool({
@@ -519,6 +549,19 @@ function applyBrowserTools(ctx: Context, controller: BridgeController): void {
 			tabId: { type: 'number', description: 'Target tab; defaults to the active tab.' },
 			doubleClick: { type: 'boolean', description: 'Send a double click instead.' },
 			focusPolicy: { type: 'string', description: "Per-call override of the plugin's focusPolicy: 'preserve' keeps the user's tab untouched (DOM-synthetic click), 'steal' activates the tab for a trusted mouse event." },
+			expect: {
+				type: 'object',
+				additionalProperties: false,
+				description: EXPECT_PARAM_DESCRIPTION,
+				properties: {
+					selector: { type: 'string', description: 'Wait until this CSS selector matches an element.' },
+					text: { type: 'string', description: 'Wait until the page text contains this string.' },
+					gone: { type: 'string', description: 'Wait until the page text no longer contains this string.' },
+					target: { type: 'string', description: 'With value: the CSS selector whose value is checked.' },
+					value: { type: 'string', description: 'With target: the exact value the element must reach.' },
+					timeoutMs: { type: 'number', description: 'Budget in ms; default 5000, max 120000.' },
+				},
+			},
 		},
 		output: {
 			schema: { type: 'object', additionalProperties: true },
@@ -530,6 +573,7 @@ function applyBrowserTools(ctx: Context, controller: BridgeController): void {
 			if (args.tabId !== undefined) params.tabId = args.tabId
 			if (args.doubleClick !== undefined) params.doubleClick = args.doubleClick
 			if (args.focusPolicy !== undefined) params.focusPolicy = args.focusPolicy
+			if (args.expect !== undefined) params.expect = args.expect
 			return await controller.execute('click', params, exec.signal) as Record<string, JsonValue>
 		},
 	}))
@@ -545,6 +589,19 @@ function applyBrowserTools(ctx: Context, controller: BridgeController): void {
 			submit: { type: 'boolean', description: 'Press Enter after filling.' },
 			mode: { type: 'string', description: "How the text lands: 'fill' (default) sets the value directly; 'type' replays real key events for keystroke-sensitive widgets but needs OS focus, so under focusPolicy=preserve it degrades to fill and reports inputDegraded." },
 			focusPolicy: { type: 'string', description: "Per-call override of the plugin's focusPolicy: 'preserve' keeps the user's tab untouched, 'steal' activates the tab so real key events land." },
+			expect: {
+				type: 'object',
+				additionalProperties: false,
+				description: EXPECT_PARAM_DESCRIPTION,
+				properties: {
+					selector: { type: 'string', description: 'Wait until this CSS selector matches an element.' },
+					text: { type: 'string', description: 'Wait until the page text contains this string.' },
+					gone: { type: 'string', description: 'Wait until the page text no longer contains this string.' },
+					target: { type: 'string', description: 'With value: the CSS selector whose value is checked.' },
+					value: { type: 'string', description: 'With target: the exact value the element must reach.' },
+					timeoutMs: { type: 'number', description: 'Budget in ms; default 5000, max 120000.' },
+				},
+			},
 		},
 		output: {
 			schema: { type: 'object', additionalProperties: true },
@@ -556,6 +613,7 @@ function applyBrowserTools(ctx: Context, controller: BridgeController): void {
 			if (args.tabId !== undefined) params.tabId = args.tabId
 			if (args.mode !== undefined) params.mode = args.mode
 			if (args.focusPolicy !== undefined) params.focusPolicy = args.focusPolicy
+			if (args.expect !== undefined) params.expect = args.expect
 			const filled = await controller.execute('input', params, exec.signal) as Record<string, JsonValue>
 			if (args.submit === true) {
 				await controller.execute('press', args.tabId === undefined ? { key: 'Enter' } : { key: 'Enter', tabId: args.tabId }, exec.signal)
@@ -571,6 +629,19 @@ function applyBrowserTools(ctx: Context, controller: BridgeController): void {
 			key: { type: 'string', required: true, description: 'Named key (Enter, Escape, ArrowDown…) or a single character.' },
 			tabId: { type: 'number', description: 'Target tab; defaults to the active tab.' },
 			focusPolicy: { type: 'string', description: "Per-call override of the plugin's focusPolicy: 'preserve' dispatches an untrusted in-page KeyboardEvent, 'steal' activates the tab for a real key event." },
+			expect: {
+				type: 'object',
+				additionalProperties: false,
+				description: EXPECT_PARAM_DESCRIPTION,
+				properties: {
+					selector: { type: 'string', description: 'Wait until this CSS selector matches an element.' },
+					text: { type: 'string', description: 'Wait until the page text contains this string.' },
+					gone: { type: 'string', description: 'Wait until the page text no longer contains this string.' },
+					target: { type: 'string', description: 'With value: the CSS selector whose value is checked.' },
+					value: { type: 'string', description: 'With target: the exact value the element must reach.' },
+					timeoutMs: { type: 'number', description: 'Budget in ms; default 5000, max 120000.' },
+				},
+			},
 		},
 		output: {
 			schema: { type: 'object', additionalProperties: true },
@@ -581,6 +652,7 @@ function applyBrowserTools(ctx: Context, controller: BridgeController): void {
 			const params: Record<string, unknown> = { key: args.key }
 			if (args.tabId !== undefined) params.tabId = args.tabId
 			if (args.focusPolicy !== undefined) params.focusPolicy = args.focusPolicy
+			if (args.expect !== undefined) params.expect = args.expect
 			return await controller.execute('press', params, exec.signal) as Record<string, JsonValue>
 		},
 	}))
