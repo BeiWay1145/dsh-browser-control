@@ -50,6 +50,19 @@ export interface Config {
 	 * Directory screenshots are written to and `cleanup` clears. Relative paths
 	 * resolve against the process working directory at resolve time.
 	 */	shotsDir?: string
+	/**
+	 * How much the agent is allowed to disturb the user's browsing.
+	 *
+	 * - `preserve` (default): keep the user's active tab and focused window
+	 *   untouched. Commands that would need OS focus are re-routed to
+	 *   DOM-synthetic equivalents, and say so in their result
+	 *   (`inputDegraded`), so the caller knows the click/keypress was not a
+	 *   trusted input event.
+	 * - `steal`: the upstream behaviour — activate the target tab and focus its
+	 *   window so real CDP input events land. Maximum fidelity, at the cost of
+	 *   yanking the user's view.
+	 */
+	focusPolicy?: 'preserve' | 'steal'
 }
 
 export const Config: z<Config> = z.object({
@@ -57,6 +70,7 @@ export const Config: z<Config> = z.object({
 	port: z.number().step(1).min(1024).max(65_535).default(9777),
 	token: z.string().default('dsh-local'),
 	shotsDir: z.string().default('dsh-browser-shots'),
+	focusPolicy: z.union([z.const('preserve'), z.const('steal')]).default('preserve'),
 })
 
 interface ResolvedConfig {
@@ -64,6 +78,7 @@ interface ResolvedConfig {
 	port: number
 	token: string
 	shotsDir: string
+	focusPolicy: 'preserve' | 'steal'
 }
 
 const SNAPSHOT_REF_SELECTOR_PATTERN = /^e\d+$/
@@ -110,7 +125,7 @@ class BridgeController {
 
 	private async reconcileNow(config: ResolvedConfig): Promise<void> {
 		const shotsDir = path.resolve(config.shotsDir)
-		const key = config.enabled ? `${config.port}|${config.token}|${shotsDir}` : ''
+		const key = config.enabled ? `${config.port}|${config.token}|${shotsDir}|${config.focusPolicy}` : ''
 		if (key === this.serverKey) return
 		const previous = this.server
 		this.server = undefined
@@ -148,7 +163,14 @@ class BridgeController {
 				this.lastError ?? '浏览器控制未启用 —— 到 dsh 设置 → 插件 → DSH 浏览器控制 打开开关',
 			)
 		}
-		return server.execute(command, params, { signal })
+		// The focus policy is a property of the bridge, not of any single call, so
+		// it rides along on every command instead of being threaded through each
+		// tool's parameter list. An explicit per-call value still wins, which is
+		// what lets one tool opt back into foreground behaviour.
+		const merged = params.focusPolicy === undefined
+			? { ...params, focusPolicy: this.current?.focusPolicy ?? 'preserve' }
+			: params
+		return server.execute(command, merged, { signal })
 	}
 
 	/**
@@ -199,6 +221,37 @@ function targetSelector(args: { selector?: string; ref?: string }): string {
 		return `[data-dsh-ref="${ref}"]`
 	}
 	return args.selector!
+}
+
+/**
+ * Render a `tabs.list` payload as a bounded, always-valid summary instead of
+ * slicing raw JSON. Slicing mid-structure used to produce fragments that read
+ * like the LIST itself was truncated (it never was — the extension returns every
+ * tab), which pushed callers into needless workarounds. Counts are stated
+ * exactly and only the row preview is capped, so a cut is never mistaken for
+ * missing data.
+ * @param value - the raw payload from the `tabs.list` command.
+ * @returns one line per tab plus an exact count when the preview is capped.
+ */
+const TABS_PREVIEW_LIMIT = 25
+
+function summarizeTabs(value: Record<string, JsonValue>): string {
+	const total = typeof value.count === 'number' ? value.count : 0
+	const activeTabId = value.activeTabId
+	const tabs = Array.isArray(value.tabs) ? value.tabs : []
+	if (tabs.length === 0) return `${total} tab(s) open; no tab details returned`
+	const shown = tabs.slice(0, TABS_PREVIEW_LIMIT)
+	const lines = shown.map(tab => {
+		const row = tab as Record<string, JsonValue>
+		const marker = row.id === activeTabId ? '*' : ' '
+		const title = typeof row.title === 'string' && row.title.length > 0 ? row.title : '(untitled)'
+		return `${marker} ${String(row.id)}  ${title.slice(0, 80)} — ${String(row.url ?? '').slice(0, 120)}`
+	})
+	const header = `${total} tab(s) open; ${shown.length} shown (* = active)`
+	const footer = tabs.length > shown.length
+		? `\n… and ${tabs.length - shown.length} more (raise detail by calling browser_tabs again; the full list is always returned)`
+		: ''
+	return `${header}\n${lines.join('\n')}${footer}`
 }
 
 function requireTabId(args: { tabId?: number }, action: string): number {
@@ -283,7 +336,20 @@ function applyBrowserTools(ctx: Context, controller: BridgeController): void {
 			+ 'and browser_click/browser_type accept the returned ref instead of guessing CSS selectors. '
 			+ 'browser_read extracts page text, browser_screenshot saves a PNG/JPEG and returns its file '
 			+ 'path (view it with an image tool). Calls fail with actionable copy while the bridge is '
-			+ 'disabled or no browser is connected.',
+			+ 'disabled or no browser is connected.\n\n'
+			+ 'SHARING THE BROWSER WITH THE USER: by default (focusPolicy=preserve) the tools never '
+			+ 'activate a tab or focus a window, so the user can keep working while you operate. '
+			+ 'Reads (browser_read, browser_evaluate, browser_snapshot, screenshots) are always '
+			+ 'background-safe. Actions that normally need foreground input are re-routed: an '
+			+ 'affected result carries inputDegraded (e.g. "dom-synthetic", "fill-instead-of-type") '
+			+ 'meaning it was synthesised in-page rather than delivered as a trusted OS event. '
+			+ 'Treat inputDegraded as a signal, not a failure: check the returned state (value, '
+			+ 'formSubmitted, page change) before assuming the action did not land, and only '
+			+ 'retry with focusPolicy="steal" when a widget provably ignores synthetic events '
+			+ '(isTrusted gates, native browser shortcuts, canvas/pointer-drag interactions) — '
+			+ 'that retry interrupts whatever the user is doing, so prefer tabId-targeted reads '
+			+ 'or asking the user first. browser_tabs activate and an explicit active:true on '
+			+ 'browser_tabs open are always respected as deliberate foreground requests.',
 	})
 
 	ctx.tools.register(defineTool({
@@ -428,6 +494,7 @@ function applyBrowserTools(ctx: Context, controller: BridgeController): void {
 			selector: { type: 'string', description: 'CSS selector; ignored when ref is given.' },
 			tabId: { type: 'number', description: 'Target tab; defaults to the active tab.' },
 			doubleClick: { type: 'boolean', description: 'Send a double click instead.' },
+			focusPolicy: { type: 'string', description: "Per-call override of the plugin's focusPolicy: 'preserve' keeps the user's tab untouched (DOM-synthetic click), 'steal' activates the tab for a trusted mouse event." },
 		},
 		output: {
 			schema: { type: 'object', additionalProperties: true },
@@ -438,6 +505,7 @@ function applyBrowserTools(ctx: Context, controller: BridgeController): void {
 			const params: Record<string, unknown> = { selector: targetSelector(args) }
 			if (args.tabId !== undefined) params.tabId = args.tabId
 			if (args.doubleClick !== undefined) params.doubleClick = args.doubleClick
+			if (args.focusPolicy !== undefined) params.focusPolicy = args.focusPolicy
 			return await controller.execute('click', params, exec.signal) as Record<string, JsonValue>
 		},
 	}))
@@ -451,6 +519,8 @@ function applyBrowserTools(ctx: Context, controller: BridgeController): void {
 			selector: { type: 'string', description: 'CSS selector; ignored when ref is given.' },
 			tabId: { type: 'number', description: 'Target tab; defaults to the active tab.' },
 			submit: { type: 'boolean', description: 'Press Enter after filling.' },
+			mode: { type: 'string', description: "How the text lands: 'fill' (default) sets the value directly; 'type' replays real key events for keystroke-sensitive widgets but needs OS focus, so under focusPolicy=preserve it degrades to fill and reports inputDegraded." },
+			focusPolicy: { type: 'string', description: "Per-call override of the plugin's focusPolicy: 'preserve' keeps the user's tab untouched, 'steal' activates the tab so real key events land." },
 		},
 		output: {
 			schema: { type: 'object', additionalProperties: true },
@@ -460,6 +530,8 @@ function applyBrowserTools(ctx: Context, controller: BridgeController): void {
 		async execute(args, exec) {
 			const params: Record<string, unknown> = { selector: targetSelector(args), value: args.value }
 			if (args.tabId !== undefined) params.tabId = args.tabId
+			if (args.mode !== undefined) params.mode = args.mode
+			if (args.focusPolicy !== undefined) params.focusPolicy = args.focusPolicy
 			const filled = await controller.execute('input', params, exec.signal) as Record<string, JsonValue>
 			if (args.submit === true) {
 				await controller.execute('press', args.tabId === undefined ? { key: 'Enter' } : { key: 'Enter', tabId: args.tabId }, exec.signal)
@@ -474,6 +546,7 @@ function applyBrowserTools(ctx: Context, controller: BridgeController): void {
 		parameters: {
 			key: { type: 'string', required: true, description: 'Named key (Enter, Escape, ArrowDown…) or a single character.' },
 			tabId: { type: 'number', description: 'Target tab; defaults to the active tab.' },
+			focusPolicy: { type: 'string', description: "Per-call override of the plugin's focusPolicy: 'preserve' dispatches an untrusted in-page KeyboardEvent, 'steal' activates the tab for a real key event." },
 		},
 		output: {
 			schema: { type: 'object', additionalProperties: true },
@@ -483,6 +556,7 @@ function applyBrowserTools(ctx: Context, controller: BridgeController): void {
 		async execute(args, exec) {
 			const params: Record<string, unknown> = { key: args.key }
 			if (args.tabId !== undefined) params.tabId = args.tabId
+			if (args.focusPolicy !== undefined) params.focusPolicy = args.focusPolicy
 			return await controller.execute('press', params, exec.signal) as Record<string, JsonValue>
 		},
 	}))
@@ -518,7 +592,7 @@ function applyBrowserTools(ctx: Context, controller: BridgeController): void {
 		},
 		output: {
 			schema: { type: 'object', additionalProperties: true },
-			render: (_args, value) => [{ type: 'text', text: JSON.stringify(value).slice(0, 400) }],
+			render: (_args, value) => [{ type: 'text', text: summarizeTabs(value) }],
 		},
 		presentCall: args => ({ card: 'generic', title: `Browser tabs: ${args.action}`, kind: 'other' as const }),
 		async execute(args, exec) {
@@ -547,6 +621,7 @@ function applyBrowserTools(ctx: Context, controller: BridgeController): void {
 		parameters: {
 			expression: { type: 'string', required: true, description: 'JavaScript expression or statement sequence; awaited like a promise body.' },
 			tabId: { type: 'number', description: 'Target tab; defaults to the active tab.' },
+			timeoutMs: { type: 'number', description: 'Wall-clock budget in ms (100-120000). Omit for no client-side deadline; set it when the expression may await something slow.' },
 		},
 		output: {
 			schema: {
@@ -561,11 +636,10 @@ function applyBrowserTools(ctx: Context, controller: BridgeController): void {
 		},
 		presentCall: () => ({ card: 'generic', title: 'Evaluate in page', kind: 'other' as const }),
 		async execute(args, exec) {
-			const raw = await controller.execute(
-				'eval',
-				args.tabId === undefined ? { expression: args.expression } : { expression: args.expression, tabId: args.tabId },
-				exec.signal,
-			) as { tabId: number; value: unknown }
+			const evalParams: Record<string, unknown> = { expression: args.expression }
+			if (args.tabId !== undefined) evalParams.tabId = args.tabId
+			if (args.timeoutMs !== undefined) evalParams.timeoutMs = args.timeoutMs
+			const raw = await controller.execute('eval', evalParams, exec.signal) as { tabId: number; value: unknown }
 			let json: string
 			try {
 				json = JSON.stringify(raw.value) ?? String(raw.value)

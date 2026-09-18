@@ -38,6 +38,19 @@ export interface Config {
      * Directory screenshots are written to and `cleanup` clears. Relative paths
      * resolve against the process working directory at resolve time.
      */ shotsDir?: string;
+    /**
+     * How much the agent is allowed to disturb the user's browsing.
+     *
+     * - `preserve` (default): keep the user's active tab and focused window
+     *   untouched. Commands that would need OS focus are re-routed to
+     *   DOM-synthetic equivalents, and say so in their result
+     *   (`inputDegraded`), so the caller knows the click/keypress was not a
+     *   trusted input event.
+     * - `steal`: the upstream behaviour — activate the target tab and focus its
+     *   window so real CDP input events land. Maximum fidelity, at the cost of
+     *   yanking the user's view.
+     */
+    focusPolicy?: 'preserve' | 'steal';
 }
 export declare const Config: z<Config>;
 /** Cordis plugin entry: wire the settings-driven lifecycle plus the model-facing tools. */
