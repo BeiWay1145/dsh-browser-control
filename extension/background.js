@@ -409,11 +409,18 @@ function trimNetworkMap(tabMap) {
 	for (let i = 0; i < overflow; i++) tabMap.delete(keys.next().value);
 }
 
-function detachTab(tabId) {
+/** Drop every per-tab attachment artifact WITHOUT issuing a chrome.debugger
+ *  call — safe to run from inside onDetach, where detaching again would be
+ *  redundant. Deleting an unknown tabId is a no-op. */
+function clearAttachment(tabId) {
 	attachedTabs.delete(tabId);
 	consoleLog.delete(tabId);
 	networkLog.delete(tabId);
 	tabBufferGenerations.delete(tabId);
+}
+
+function detachTab(tabId) {
+	clearAttachment(tabId);
 	chrome.debugger.detach({ tabId }, () => void chrome.runtime.lastError);
 }
 
@@ -423,33 +430,59 @@ function detachAll() {
 
 /* Clean up when a tab is closed (detaches automatically, but remove from set). */
 chrome.tabs.onRemoved.addListener((tabId) => {
-	if (attachedTabs.has(tabId)) attachedTabs.delete(tabId);
-	consoleLog.delete(tabId);
-	networkLog.delete(tabId);
-	tabBufferGenerations.delete(tabId);
+	clearAttachment(tabId);
 });
 
-/* Clean up when DevTools steals a tab (detach event fires). */
-chrome.debugger.onDetach.addListener((_source, reason) => {
-	if (reason === 'target_closed' || reason === 'canceled_by_user') {
-		// attachedTabs cleanup is handled by chrome.tabs.onRemoved
-	}
+/* Invalidate the attachment cache whenever the debugger detaches, for ANY
+ * reason. The cache is the only thing standing between an unexpected detach
+ * (DevTools opened on the tab, a chrome-extension:// page, a navigation race)
+ * and a clean re-attach: ensureAttached() returns early on a cache hit, so a
+ * stale entry makes every later command fail with "Debugger is not attached"
+ * forever. tabs.onRemoved also calls clearAttachment, so tab closures are
+ * covered twice — harmless, the operation is idempotent. */
+chrome.debugger.onDetach.addListener((source) => {
+	const tabId = source?.tabId;
+	if (tabId === undefined) return;
+	clearAttachment(tabId);
 });
+
+/* Chrome reports a lost CDP session with one of these wordings. The cache can
+ * still say "attached" when the detach event was missed (service-worker
+ * restart, a race with DevTools), so dbgSend treats them as a cache-invalidating
+ * signal and lets withCDP transparently re-attach once. */
+const DETACHED_RE = /not attached|Detached while handling|Inspected target navigated or closed|Cannot access a chrome-extension:\/\/ URL/i;
 
 function dbgSend(tabId, method, params) {
 	return new Promise((resolve, reject) => {
 		chrome.debugger.sendCommand({ tabId }, method, params ?? {}, (res) => {
 			const err = chrome.runtime.lastError;
-			if (err) reject(new Error(`${method} failed: ${err.message}`));
-			else resolve(res);
+			if (!err) { resolve(res); return; }
+			if (DETACHED_RE.test(err.message)) {
+				// The cached entry is lying; drop it so the retry re-attaches.
+				clearAttachment(tabId);
+				const stale = new Error(`${method} failed: ${err.message}`);
+				stale.code = 'cdp_detached';
+				reject(stale);
+				return;
+			}
+			reject(new Error(`${method} failed: ${err.message}`));
 		});
 	});
 }
 
-/** Persistent CDP: attaches (if not already) and holds. */
+/** Persistent CDP: attaches (if not already) and holds. A command that fails
+ *  because the session was lost mid-flight re-attaches ONCE and replays, which
+ *  turns the old "detached means this tab is dead forever" behavior into a
+ *  single transparent retry. A second failure propagates to the caller. */
 async function withCDP(tabId, fn) {
 	await ensureAttached(tabId);
-	return fn((method, params) => dbgSend(tabId, method, params));
+	try {
+		return await fn((method, params) => dbgSend(tabId, method, params));
+	} catch (error) {
+		if (error?.code !== 'cdp_detached') throw error;
+		await ensureAttached(tabId);
+		return fn((method, params) => dbgSend(tabId, method, params));
+	}
 }
 
 /* ------------------------------------------------------- command handlers */
