@@ -39,7 +39,9 @@ Agent 和上层脚本可以依赖的确定性语义。违反这些契约视为 b
 
 ## 超时
 
-- 所有涉及页面交互的命令接受 `timeoutMs`（毫秒）：navigate/tabs.open 默认 15000，wait 默认 15000 上限 120000，evaluate 默认 60000（桥接层上限 300000）。
+- 所有涉及页面交互的命令接受 `timeoutMs`（毫秒）：navigate/tabs.open 默认 15000，wait 默认 15000 上限 120000。
+- `browser_evaluate` 的 `timeoutMs` 可选，范围 100–120000，**省略时没有客户端超时**（内部走 `|| null`，不会强加一个默认值）。桥接层上限 300000。
+  注意：早前文档写成「evaluate 默认 60000」是错的，且 `100` 只是非法输入的下限兜底，不是默认值——曾因此产生「为什么报 eval timeout after 100ms」的困惑。
 
 ## 后台标签页节流
 
@@ -48,3 +50,31 @@ Chrome 对非前台标签页的 `setTimeout` 强制钳制到 ≥1s。长任务�
 ## 死站点检测
 
 导航落到 `chrome-error://` 时，`browser_navigate` 结果携带 `siteUnreachable: {reason}`（dns/unreachable），且 `url` 回报为请求的目标 URL 而非内部协议地址。
+
+## 目标受限：哪些页面永远无法自动化
+
+Chrome 在 attach 时按 scheme 做白名单校验，**两类目标永久拒绝对其启动调试协议**。这不是插件的缺陷，也不是可绕过的：`debugger` 权限若能读取同级扩展的上下文，任何扩展都能窥探密码管理器或钱包的内部状态。
+
+| 目标 | 报错 code | Chrome 原始文案 |
+|---|---|---|
+| 其他扩展的页面 `chrome-extension://<其他ID>/` | `restricted_other_extension` | `Cannot access a chrome-extension:// URL of different extension` |
+| 浏览器内置页 `chrome://` `edge://` | `restricted_browser_internal` | `Cannot access chrome:// and edge:// URLs` |
+
+**受限 ≠ 完全不可用。** 实测边界如下：
+
+| 操作 | 受限目标上是否可用 |
+|---|---|
+| `browser_tabs list` 读取 url / title | ✅ 可用（并标注 `restricted` 字段） |
+| `browser_tabs open` / `close` / `activate` | ✅ 可用 |
+| `browser_navigate` 导航到该页 | ✅ 可用 |
+| 任何需要 CDP 的读写（read/snapshot/evaluate/click/type/screenshot） | ❌ 永久拒绝 |
+
+对比参考（均为实测）：`file://`、`about:blank` **可以**正常 attach；本扩展自己的页面也不在受限之列（受限的只有「其他」扩展）。因此受限名单是**显式枚举**而非"凡非 http(s) 即拒"——误判会白白放弃本可完成的工作。
+
+**调用方应遵循：**
+
+- 在盘点阶段就读 `browser_tabs list` 的 `restricted` 标记，不要在受限标签上安排工作。
+- 收到 `restricted_*` 错误时**不要重试**——条件是永久的，重试只是浪费轮次。这与 `window_minimized`（需用户手动还原窗口）属于同类：应交给用户。
+- 需要用户在该页操作时，给出**一条具体指令**（如「请在 Tampermonkey 页面点『安装』」），然后继续推进其余步骤。
+
+**已评估且不成立的绕过路径**（不必再试）：`chrome.scripting.executeScript` 注入（同样受 host 限制，且无法注入其他扩展页）；`chrome.debugger` 先 attach `chrome://extensions` 再间接操作（该页本身即被拒）。

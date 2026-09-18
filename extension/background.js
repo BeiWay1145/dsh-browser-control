@@ -290,6 +290,61 @@ async function activateTabWindow(tabId) {
 	} catch { /* tab may be closing; input will fail downstream anyway */ }
 }
 
+/* --------------------------------------------------- attachment restrictions */
+
+/**
+ * Classify a tab whose URL Chrome will not let `chrome.debugger` attach to.
+ *
+ * Chrome enforces a scheme-level allowlist at attach time, and the two blocked
+ * classes report DIFFERENT copy:
+ *   - another extension's page -> "Cannot access a chrome-extension:// URL of
+ *     different extension" (an extension may not debug a sibling's context)
+ *   - browser-internal pages    -> "Cannot access chrome:// and edge:// URLs"
+ * Neither is a bug in this plugin and neither is bypassable: a debugger
+ * permission must not grant read access to a password manager's or wallet's
+ * internals. Detecting the class up front lets us fail with an actionable,
+ * correctly-attributed error instead of Chrome's raw message, which invites the
+ * wrong remedy ("close DevTools") and burns retries on a permanent condition.
+ * @param url - the tab's URL (may be empty for a not-yet-committed tab).
+ * @returns a restriction descriptor, or null when attaching is permitted.
+ */
+function classifyRestriction(url) {
+	const target = typeof url === 'string' ? url : '';
+	const extMatch = /^chrome-extension:\/\/([a-p]{32})\//i.exec(target);
+	if (extMatch) {
+		// Our own pages would be attachable; only a SIBLING extension is blocked.
+		if (extMatch[1] === chrome.runtime.id) return null;
+		return {
+			code: 'restricted_other_extension',
+			extensionId: extMatch[1],
+			hint: `This is another extension's page (${extMatch[1]}). Chrome forbids one extension from debugging another's context, so no browser_* read or click can ever work here. Hand this step to the user; browser_tabs list still reports this tab's url and title, and browser_tabs open/navigate can still bring the page up.`,
+		};
+	}
+	// Measured, not assumed: about:blank and file:// DO attach, so only the
+	// browser's own privileged pages are listed here. Being conservative costs
+	// real capability — a false positive would refuse work that would have
+	// succeeded — so this stays an explicit allowlist-of-blocked-schemes rather
+	// than a blanket "anything without an http(s) scheme".
+	if (/^(chrome|edge|brave|opera|vivaldi|devtools|view-source):/i.test(target)) {
+		return {
+			code: 'restricted_browser_internal',
+			hint: `This is a browser-internal page (${target.split(':')[0]}://). Chrome blocks the debugger protocol on these, so no browser_* read or click can work here. Ask the user to perform the step manually — for example, reloading an extension is done on chrome://extensions by hand.`,
+		};
+	}
+	return null;
+}
+
+/** Throw the classified restriction, if any, before wasting an attach attempt. */
+function assertAttachable(tab) {
+	const restriction = classifyRestriction(tab && tab.url);
+	if (restriction === null) return;
+	const error = new Error(
+		`cannot automate this tab: ${restriction.code}. ${restriction.hint}`,
+	);
+	error.code = restriction.code;
+	throw error;
+}
+
 /* ---------------------------------------------------------- debugger (CDP) — persistent attachment */
 
 /**
@@ -299,6 +354,11 @@ async function activateTabWindow(tabId) {
  */
 async function ensureAttached(tabId) {
 	if (attachedTabs.has(tabId)) return;
+	// Fail BEFORE attempting the attach for targets Chrome categorically refuses.
+	// The raw message for these ("…of different extension") invites the wrong
+	// remedy, and the condition is permanent, so retrying is pure waste.
+	const pre = await chrome.tabs.get(tabId).catch(() => null);
+	if (pre !== null) assertAttachable(pre);
 	await new Promise((resolve, reject) => {
 		chrome.debugger.attach({ tabId }, '1.3', () => {
 			const err = chrome.runtime.lastError;
@@ -308,7 +368,25 @@ async function ensureAttached(tabId) {
 				resolve();
 				return;
 			}
-			reject(new Error(`debugger attach failed: ${err.message} (DevTools 打开着这个页面? 先关掉)`));
+			// Chrome can still refuse for a target we could not classify (a page
+			// that navigated between the check and the attach). Re-classify the
+			// live URL so the caller gets the actionable error rather than the
+			// raw copy.
+			chrome.tabs.get(tabId).then((fresh) => {
+				const restriction = classifyRestriction(fresh && fresh.url);
+				if (restriction !== null) {
+					const classified = new Error(`cannot automate this tab: ${restriction.code}. ${restriction.hint}`);
+					classified.code = restriction.code;
+					reject(classified);
+					return;
+				}
+				// "Close DevTools" is now only suggested on the ONE error where it is
+				// actually the likely cause: a real debugger collision on a normal page.
+				const devtools = /Another debugger|already attached to/i.test(err.message);
+				reject(new Error(`debugger attach failed: ${err.message}${devtools ? ' (is DevTools open on this tab? close it and retry)' : ''}`));
+			}).catch(() => {
+				reject(new Error(`debugger attach failed: ${err.message}`));
+			});
 		});
 	});
 	// Enable the domains whose events we consume (dialogs, navigation results,
@@ -658,17 +736,31 @@ const PRESETS = {
 };
 
 async function cmdBrowserInfo() {
-	return { client: 'dsh-browser-extension', version: EXT_VERSION, browser: helloInfo };
+	return {
+		client: 'dsh-browser-extension', version: EXT_VERSION, browser: helloInfo,
+		// The agent needs this to tell "my own page" from "a sibling extension's",
+		// which is the difference between attachable and permanently blocked.
+		extensionId: chrome.runtime.id,
+	};
 }
 
 async function cmdTabsList() {
 	const tabs = await chrome.tabs.query({});
 	// Compact shape (id/url/active/title only): the bridge serializes this
 	// straight into a tool result and wide shapes were truncating mid-JSON.
+	// `restricted` is attached here so the limits of a tab are visible during
+	// the inventory step — the agent can route around an undebuggable tab before
+	// spending a call that is guaranteed to fail.
 	return {
 		count: tabs.length,
 		activeTabId: tabs.find((t) => t.active)?.id,
-		tabs: tabs.map((t) => ({ id: t.id, url: t.url, title: t.title, active: t.active })),
+		tabs: tabs.map((t) => {
+			const restriction = classifyRestriction(t.url);
+			return {
+				id: t.id, url: t.url, title: t.title, active: t.active,
+				...(restriction === null ? {} : { restricted: restriction.code }),
+			};
+		}),
 	};
 }
 
