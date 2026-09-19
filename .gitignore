@@ -5,3 +5,7 @@ lib/tsconfig.tsbuildinfo
 *.crx
 .DS_Store
 *.tmp
+
+# scratch/research artifacts
+.research/
+
