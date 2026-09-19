@@ -54,16 +54,17 @@ export interface Config {
 	 * How much the agent is allowed to disturb the user's browsing.
 	 *
 	 * - `preserve` (default): never activate a tab or focus a window, so the
-	 *   user keeps working. This costs less than it sounds, because it was
-	 *   MEASURED that CDP key events reach a background tab: browser_type's
-	 *   'type' mode and browser_press deliver real keystrokes without any
-	 *   activation, and reads never needed it. Only clicking is affected —
-	 *   a trusted mouse event is placed in viewport coordinates and so needs the
-	 *   tab rendered in front, so `preserve` dispatches a DOM click instead and
-	 *   reports `inputDegraded: "dom-synthetic"` (untrusted, no hit test).
-	 * - `steal`: activate the target tab and focus its window, so even clicking
-	 *   uses a real mouse event at real coordinates. Use it when a page provably
-	 *   ignores synthetic clicks — but it yanks the user's view.
+	 *   user keeps working. MEASURED to cost nothing in fidelity: a background
+	 *   tab keeps a real viewport and accepts BOTH trusted key events and trusted
+	 *   coordinate mouse clicks, so browser_click, browser_type(mode:"type") and
+	 *   browser_press all deliver genuine input (isTrusted true) with no
+	 *   activation, and hitVerified still detects an overlay over the target.
+	 *   Reads never needed focus either.
+	 * - `steal`: activate the target tab and focus its window. Only useful for a
+	 *   page that disables its own interactivity while it believes it is
+	 *   unfocused (it gates on document.hasFocus() or visibilitychange). It yanks
+	 *   the user's view, so reach for it only after a preserve click
+	 *   demonstrably did nothing.
 	 */
 	focusPolicy?: 'preserve' | 'steal'
 }
@@ -368,18 +369,16 @@ function applyBrowserTools(ctx: Context, controller: BridgeController): void {
 			+ 'disabled or no browser is connected.\n\n'
 			+ 'SHARING THE BROWSER WITH THE USER: by default (focusPolicy=preserve) the tools never '
 			+ 'activate a tab or focus a window, so the user can keep working while you operate. '
-			+ 'This costs you almost nothing: reads are background-safe, and typing is too — '
-			+ 'browser_type(mode:"type") and browser_press deliver REAL keystrokes to a background '
-			+ 'tab, because CDP key events do not require the tab to be in front. The one genuine '
-			+ 'trade-off is clicking: a trusted mouse event lands at viewport coordinates and so '
-			+ 'needs the tab rendered in front, so preserve dispatches a DOM click and marks the '
-			+ 'result inputDegraded:"dom-synthetic" (isTrusted is false, overlays are not '
-			+ 'hit-tested). Treat that marker as a signal, not a failure: check the returned state '
-			+ '(value, formSubmitted, page change) or pass expect, and only retry with '
-			+ 'focusPolicy="steal" when a widget provably ignores synthetic clicks — that retry '
-			+ 'interrupts whatever the user is doing, so prefer reading over re-clicking. '
-			+ 'browser_tabs activate and an explicit active:true on browser_tabs open are always '
-			+ 'respected as deliberate foreground requests.\n\n'
+			+ 'It costs you no fidelity at all: a background tab keeps a real viewport and accepts '
+			+ 'trusted input, so browser_click, browser_type(mode:"type") and browser_press all '
+			+ 'deliver genuine (isTrusted) events to a tab that was never brought forward, and '
+			+ 'hitVerified still detects an overlay covering the target. Reads are background-safe '
+			+ 'too. Reach for focusPolicy="steal" only when a page disables its own interactivity '
+			+ 'while it believes it is unfocused — typically one gating on document.hasFocus() or '
+			+ 'on visibilitychange — and only after a preserve click demonstrably did nothing, '
+			+ 'because that retry interrupts whatever the user is doing. browser_tabs activate and '
+			+ 'an explicit active:true on browser_tabs open are always respected as deliberate '
+			+ 'foreground requests.\n\n'
 			+ 'WHAT CANNOT BE AUTOMATED: Chrome blocks the debugger protocol on two classes of '
 			+ 'page, so no browser_* read or click will ever work on them. This is a browser '
 			+ 'security boundary, not a transient failure — never retry it: (1) another '

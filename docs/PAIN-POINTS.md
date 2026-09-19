@@ -21,13 +21,23 @@
 
 前三者不需要新能力，只需要**正确地报告状态**。
 
-### 最重要的单点发现：两全方案成立
+### 最重要的单点发现：两全方案完全成立
 
-源码注释声称"真实按键需要 OS 焦点"，因此 `preserve` 模式下 `type` 只能降级为
-`fill`。**实测推翻了这一前提**——CDP 按键事件可以送达后台标签，页面自己的
-`keydown` 监听器照常触发，而用户标签全程不被抢。
+源码注释声称"真实按键需要 OS 焦点"，因此 `preserve` 下 `type` 只能降级为 `fill`；
+另一条注释声称鼠标坐标"只在前台标签有意义"，因此 `click` 只能降级为 DOM `el.click()`。
 
-**"不抢焦点"与"正常输入"不是二选一。** 详见第 3 节。
+**两条前提都被实测推翻。** 后台标签有真实视口（实测 792×1115），
+读取 / 按键 / 鼠标点击**三类输入全部以 `isTrusted: true` 送达**，
+而用户标签全程不被抢。
+
+```
+浏览器点击（真实站点 bilibili.com）:
+  页面记录 {"trusted":true, "x":375, "y":330}
+  宿主真相 tabActive=false, windowFocused=false
+```
+
+**"不抢焦点"与"正常输入"不是二选一 —— 保真度损失为零。**
+`inputDegraded` 已从代码中彻底删除。详见第 3 节。
 
 ---
 
@@ -183,10 +193,10 @@ if (mode === 'type') await activateTabWindow(tab.id);
 | 输入类型 | 需要前台？ | 原因 |
 |---|---|---|
 | 读取（evaluate/read/snapshot） | ❌ | 无坐标、无焦点依赖 |
-| **按键（insertText / dispatchKeyEvent）** | ❌ | 送到"当前焦点元素"，与视口渲染无关 |
-| **鼠标（dispatchMouseEvent）** | ✅ | **坐标是视口坐标**，后台标签不渲染则无意义 |
+| 按键（insertText / dispatchKeyEvent） | ❌ | 送到"当前焦点元素"，与视口渲染无关 |
+| **鼠标（dispatchMouseEvent）** | ❌ | **后台标签视口非 0（实测 792×1115），坐标语义完整** |
 
-**所以只有点击受限**——而点击在 `preserve` 下已用 DOM `el.click()` 解决。
+**三类输入全部不需要前台** —— 这是**两次误判后才确立**的结论，见 7.3。
 
 #### 端到端验证（经插件层，非直连桥）
 
@@ -200,21 +210,62 @@ browser_type(mode:"type", tabId:<后台标签>, expect:{target:"#i", value:"PLUG
 
 中文输入同样验证通过（`"两全方案"`，走 `insertText`）。
 
+#### 鼠标侧的决定性实验（对照 + 宿主取证）
+
+探针同时跑**对照组**（不启用焦点仿真）与**实验组**（`Emulation.setFocusEmulationEnabled`）：
+
+| 组别 | 页面收到的事件 | 结论 |
+|---|---|---|
+| 对照组（无仿真） | `mousedown/mouseup/click` 全部 **`isTrusted: true`** | **已足够，无需仿真** |
+| 实验组（有仿真） | 完全相同 | 仿真对送达**无额外贡献** |
+
+**宿主侧独立取证**（关键——不能只信页面）：
+
+```
+页面自报(启用仿真后): hasFocus=true,  visibility="visible"   ← 页面"以为"有焦点
+宿主真相:             tabActive=false, windowFocused=false   ← 实际没有
+```
+
+⇒ 焦点仿真会让页面**自报有焦点**，所以**必须用 `chrome.tabs`/`chrome.windows` 独立取证**，
+否则结论会完全相反。
+
+**命中测试在后台同样真实可用**（实测）：
+
+| 场景 | 返回 | 页面实际落点 |
+|---|---|---|
+| 无遮罩 | `hitVerified: true` | `button` |
+| `z-index:99999` 遮罩 | `hitVerified: false`, `hitInstead:"div"` | `overlay`（未穿透） |
+
+**真实站点验证**（`www.bilibili.com` 注入受控按钮）：
+
+```
+点击: x=375, y=330, hitVerified:true
+页面记录: {"trusted":true, "x":375, "y":330}   ← 坐标精确匹配
+用户焦点: 未变
+```
+
+额外的强证据：点击 B 站真实视频卡片时，**站点自己的 `target="_blank"` 逻辑触发了新标签导航**
+—— 这是点击真实性的最强证明，合成事件无法触发这类站点原生行为。
+
 ### 修复
 
-`Config.focusPolicy`（默认 `preserve`）。基于上述实测，**降级面已收窄到只剩点击**：
+`Config.focusPolicy`（默认 `preserve`）。**降级面已归零**：
 
 | 操作 | preserve 下的行为 | 上报字段 |
 |---|---|---|
-| `click` | 页内 `el.click()`（坐标依赖无法回避） | `inputDegraded: 'dom-synthetic'` |
-| `type` | **真实按键，不再降级** ✅ | — |
-| `press` | **真实按键，不再降级** ✅ | — |
+| `click` | **真实坐标点击**，`isTrusted: true`，`hitVerified` 真实可用 ✅ | — |
+| `type` | **真实按键** ✅ | — |
+| `press` | **真实按键** ✅ | — |
 | `tabs.open` | 默认后台打开 | `openedInBackground: true` |
 | 读取类 | 无需改动，本就后台安全 | — |
 
-**`inputDegraded` 现在只在点击时出现。** 它意味着：合成点击（`isTrusted` 为 false），
-`hitVerified` 恒为 `false`（无坐标命中测试），sticky 头部/广告遮挡不会被发现。
-故点击结果同时带 `degradedReason`，并用 `expect` 提供替代校验手段。
+**`inputDegraded` 已从代码中彻底删除** —— 不再有任何降级路径。
+`preserve` 与 `steal` 的唯一差别是**是否调用 `activateTabWindow()`**，
+输入保真度完全相同。
+
+> `steal` 保留的意义已收窄到一种情况：页面在**自认为失焦**时自行禁用交互
+> （监听 `document.hasFocus()` 或 `visibilitychange`）。这类页面即使事件送达也会被忽略，
+> 此时才需要真切前台 —— 或考虑 `Emulation.setFocusEmulationEnabled`（见下）。
 
 `browser_tabs activate` 与显式 `active:true` 始终生效——那是明确的前台请求。
 
@@ -459,6 +510,47 @@ pnpm add "file:D:/VibeCoding/project/dsh-plugin/dsh-browser-control"
 **教训**：对插件类改动，「构建成功」「推送成功」**都不等于「已生效」**。
 必须独立验证加载来源 —— 最省事的办法是在 fork 里加一个可观测特征（如本 fork 的
 `summarizeTabs`），重启后看它是否出现。
+
+### 7.3 同一类错误在本项目犯了两次：把"可能需要"泛化成"必须"
+
+本章最值得记住的一条。两次误判的**结构完全相同** —— 都是读了一条看似权威的代码注释，
+就把某个能力依赖泛化到了更大范围：
+
+| # | 错误前提（源码注释） | 实际范围 | 造成的多余设计 |
+|---|---|---|---|
+| 1 | `Real key events require the tab to have OS-level focus` | 只对**鼠标坐标**成立 | `type` 降级为 `fill`、`press` 合成事件 |
+| 2 | `Mouse events land on whatever is under the viewport coordinates of the focused tab` | 后台标签**视口非 0**，坐标语义完整 | `click` 降级为 DOM `el.click()`（不可信、无命中测试） |
+
+**两次都由实测推翻。** 教训是：**代码注释里的"需要 X"是待验证假设，不是事实**，
+尤其当它描述的是浏览器行为时。验证成本很低（一次探针），而错误设计会长期累积。
+
+### 7.4 本机实测的 CDP 空白与生态对照
+
+为确认"后台可信点击"是否已有成熟做法，横向调查了 Cua / Puppeteer / Playwright /
+browser-use / chrome-devtools-mcp / chromedp / Selenium 等项目：
+
+- **共识**：`Emulation.setFocusEmulationEnabled` 是 CDP 里唯一相关机制
+  （Puppeteer 有公开 API `page.emulateFocusedPage()`；chrome-devtools-mcp 每个 page 无条件开启）。
+- **但实测证明它对本场景无必要** —— 对照组（不启用）已 `isTrusted: true`。它只改变
+  页面**感知**（`hasFocus`/`visibilityState` 翻成 true），不改变送达能力。
+- **它仍值得保留为逃生舱**：对"自认为失焦就禁用交互"的页面，这是唯一不动用户焦点的解法。
+- **负面证据**：除焦点模拟外，**没有任何项目实现过后台坐标点击**；CDP 原生缺少
+  前景焦点事件（[chromium #497896141](https://issues.chromium.org/issues/497896141)）。
+  说明这里曾是生态空白。
+- **Cua 文档偏乐观**：其文档称 Windows 上 "passing trusted background evidence"，
+  但源码里独立浏览器窗口的对抗性证据实际标注为 `deferred / evidence gap`，
+  日志中仅 Electron 行通过。
+
+**无条件可借鉴的**（无论上述结论如何都成立）：
+
+| 改进 | 来源 | 价值 |
+|---|---|---|
+| 派发完整事件序列（`pointerdown→mousedown→pointerup→mouseup→click`，带 `composed:true` 穿透 shadow DOM） | Cua `dom_event` | 比裸 `el.click()` 覆盖面广得多（**现仅在极端降级路径需要**） |
+| 遮挡预检 + `label/input` 语义三 case | browser-use | 避免把 label 包裹 input 误判为遮挡 |
+| 沿 shadow DOM 分层的命中测试 | Playwright `expectHitTarget` | **纯读、不抢焦点**，可提前预警遮挡 |
+| `effect: "unverifiable"` 的诚实语义 | Cua | CDP 命令成功 ≠ 控件被激活 |
+| 四边形顶点均值算点击点 | chromedp | 对旋转/形变元素比 bbox 中心更准 |
+| `buttons` 字段（按下 1 / 抬起 0） | Cua | 贴近真实鼠标序列，值读 `event.buttons` 的页面需要 |
 
 ---
 

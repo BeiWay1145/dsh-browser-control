@@ -1,0 +1,1 @@
+{"command":"eval","params":{"tabId":1252984588,"expression":"(()=>{window.__t=[];['mousedown','mouseup','click'].forEach(t=>document.addEventListener(t,e=>window.__t.push({t,trusted:e.isTrusted,x:e.clientX,y:e.clientY,tag:e.target&&e.target.tagName}),true));return 'installed'})()","returnByValue":true}}

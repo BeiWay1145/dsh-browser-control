@@ -42,16 +42,17 @@ export interface Config {
      * How much the agent is allowed to disturb the user's browsing.
      *
      * - `preserve` (default): never activate a tab or focus a window, so the
-     *   user keeps working. This costs less than it sounds, because it was
-     *   MEASURED that CDP key events reach a background tab: browser_type's
-     *   'type' mode and browser_press deliver real keystrokes without any
-     *   activation, and reads never needed it. Only clicking is affected —
-     *   a trusted mouse event is placed in viewport coordinates and so needs the
-     *   tab rendered in front, so `preserve` dispatches a DOM click instead and
-     *   reports `inputDegraded: "dom-synthetic"` (untrusted, no hit test).
-     * - `steal`: activate the target tab and focus its window, so even clicking
-     *   uses a real mouse event at real coordinates. Use it when a page provably
-     *   ignores synthetic clicks — but it yanks the user's view.
+     *   user keeps working. MEASURED to cost nothing in fidelity: a background
+     *   tab keeps a real viewport and accepts BOTH trusted key events and trusted
+     *   coordinate mouse clicks, so browser_click, browser_type(mode:"type") and
+     *   browser_press all deliver genuine input (isTrusted true) with no
+     *   activation, and hitVerified still detects an overlay over the target.
+     *   Reads never needed focus either.
+     * - `steal`: activate the target tab and focus its window. Only useful for a
+     *   page that disables its own interactivity while it believes it is
+     *   unfocused (it gates on document.hasFocus() or visibilitychange). It yanks
+     *   the user's view, so reach for it only after a preserve click
+     *   demonstrably did nothing.
      */
     focusPolicy?: 'preserve' | 'steal';
 }

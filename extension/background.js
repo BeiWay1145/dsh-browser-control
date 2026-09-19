@@ -990,52 +990,26 @@ async function cmdClick(params) {
 	if (!params.selector) throw new Error('params.selector is required');
 	const tab = await resolveTab(params.tabId);
 
-	// Focus policy: CDP mouse events are delivered in viewport coordinates, and
-	// those are only meaningful while the tab is the one being rendered — so the
-	// real-input path has to activate it. Under 'preserve' we instead dispatch a
-	// DOM click inside the page, which needs no foreground tab at all. The
-	// trade-off is explicit and reported: a synthetic click is not a trusted
-	// input event, so isTrusted checks and coordinate hit-testing do not apply.
-	if (!mayStealFocus(params)) {
-		return withCDP(tab.id, async (send) => {
-			const synthetic = await send('Runtime.evaluate', {
-				expression: `(() => {
-					const el = document.querySelector(${JSON.stringify(String(params.selector))});
-					if (!el) return null;
-					el.scrollIntoView({ block: 'center', inline: 'center' });
-					const r = el.getBoundingClientRect();
-					el.click();
-					return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2),
-						tag: el.tagName.toLowerCase(), text: (el.textContent || '').trim().slice(0, 120) };
-				})()`,
-				awaitPromise: false, returnByValue: true, userGesture: true,
-			}).then((res) => {
-				if (res.exceptionDetails) throw new Error(res.exceptionDetails.text);
-				return res.result.value;
-			});
-			if (!synthetic) throw new Error(`element not found: ${params.selector}`);
-			// Verifying the outcome here is what turns "I clicked something" into
-			// "the click had this effect" — one round trip instead of a follow-up
-			// screenshot. Absent for a DOM click is hit-testing, which never had
-			// a chance to run; `expect` is the substitute that was actually earned.
-			const expected = params.expect ? await runExpectation(send, params.expect) : undefined;
-			return {
-				tabId: tab.id,
-				clicked: synthetic,
-				// A DOM click cannot be hit-tested the way a real one is, so this is
-				// reported as unverified rather than silently claimed as a success.
-				hitVerified: false,
-				inputDegraded: 'dom-synthetic',
-				degradedReason: 'focusPolicy=preserve: dispatched a DOM click instead of a trusted mouse event (isTrusted is false; overlays are not hit-tested). Set focusPolicy=steal to force real input.',
-				...(expected === undefined ? {} : { expected }),
-				dialogsAnswered: dialogLog.filter((d) => d.tabId === tab.id && Date.now() - d.t < 5000).length,
-			};
-		});
-	}
-
-	// Mouse events land on whatever is under the viewport coordinates of the
-	// focused tab; ensure our tab is frontmost so coordinates are meaningful.
-	await activateTabWindow(tab.id);
+	// MEASURED, and it reverses an earlier design. Mouse events do NOT need the
+	// tab to be foreground: a background tab has a real (non-zero) viewport and
+	// accepts trusted coordinate input. Verified on Edge 151 by dispatching into
+	// an inactive tab and reading back what the page observed —
+	// mousedown/mouseup/click all arrived with isTrusted:true at correct
+	// coordinates, while chrome.tabs.get().active and
+	// chrome.windows.get().focused both stayed false. Hit-testing works there
+	// too: with a z-index:99999 overlay covering the target, the events landed
+	// on the overlay, matching document.elementFromPoint.
+	//
+	// Emulation.setFocusEmulationEnabled was tested and is NOT needed for this —
+	// it only changes what the page BELIEVES (hasFocus/visibilityState flip to
+	// true) and adds nothing to delivery. It remains the escape hatch for pages
+	// that disable their own interactivity when they think they are unfocused.
+	//
+	// So there is now ONE click path, and 'preserve' no longer degrades to a
+	// synthetic DOM click. It simply skips the activation. Only an explicit
+	// 'steal' pulls the tab to the front — which matters for a page that gates
+	// on document.hasFocus() or on visibilitychange, nothing else.
+	if (mayStealFocus(params)) await activateTabWindow(tab.id);
 	return withCDP(tab.id, async (send) => {
 		const hit = await send('Runtime.evaluate', {
 			expression: `(() => {
@@ -1058,13 +1032,21 @@ async function cmdClick(params) {
 		});
 		if (!hit) throw new Error(`element not found: ${params.selector}`);
 		const clickCount = params.doubleClick ? 2 : 1;
-		await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: hit.x, y: hit.y });
-		await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: hit.x, y: hit.y, button: 'left', clickCount });
-		await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hit.x, y: hit.y, button: 'left', clickCount });
+		// `buttons` states which buttons are HELD during the event (1 = primary
+		// held, 0 = none). Chrome tolerates its absence, but supplying it makes
+		// the sequence match a real mouse and matters to pages that read
+		// `event.buttons` (drag-adjacent UI, canvas drawing).
+		await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: hit.x, y: hit.y, buttons: 0 });
+		await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: hit.x, y: hit.y, button: 'left', buttons: 1, clickCount });
+		await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hit.x, y: hit.y, button: 'left', buttons: 0, clickCount });
 		const expected = params.expect ? await runExpectation(send, params.expect) : undefined;
 		return {
 			tabId: tab.id,
 			clicked: { x: hit.x, y: hit.y, tag: hit.tag, text: hit.text },
+			// Now a real check again: the dispatched events are trusted and land at
+			// these coordinates, so whether elementFromPoint sees the target
+			// predicts whether the click actually reached it. (Under the old DOM
+			// fallback this was hardcoded false, because nothing was hit-tested.)
 			hitVerified: hit.isTop,
 			...(hit.isTop ? {} : { hitInstead: hit.hitTag }),
 			...(expected === undefined ? {} : { expected }),
@@ -1368,6 +1350,7 @@ async function cmdSnapshot(params) {
 		return payload;
 	});
 }
+
 
 const COMMANDS = {
 	ping: cmdPing, 'browser.info': cmdBrowserInfo,
