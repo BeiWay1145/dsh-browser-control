@@ -53,14 +53,17 @@ export interface Config {
 	/**
 	 * How much the agent is allowed to disturb the user's browsing.
 	 *
-	 * - `preserve` (default): keep the user's active tab and focused window
-	 *   untouched. Commands that would need OS focus are re-routed to
-	 *   DOM-synthetic equivalents, and say so in their result
-	 *   (`inputDegraded`), so the caller knows the click/keypress was not a
-	 *   trusted input event.
-	 * - `steal`: the upstream behaviour — activate the target tab and focus its
-	 *   window so real CDP input events land. Maximum fidelity, at the cost of
-	 *   yanking the user's view.
+	 * - `preserve` (default): never activate a tab or focus a window, so the
+	 *   user keeps working. This costs less than it sounds, because it was
+	 *   MEASURED that CDP key events reach a background tab: browser_type's
+	 *   'type' mode and browser_press deliver real keystrokes without any
+	 *   activation, and reads never needed it. Only clicking is affected —
+	 *   a trusted mouse event is placed in viewport coordinates and so needs the
+	 *   tab rendered in front, so `preserve` dispatches a DOM click instead and
+	 *   reports `inputDegraded: "dom-synthetic"` (untrusted, no hit test).
+	 * - `steal`: activate the target tab and focus its window, so even clicking
+	 *   uses a real mouse event at real coordinates. Use it when a page provably
+	 *   ignores synthetic clicks — but it yanks the user's view.
 	 */
 	focusPolicy?: 'preserve' | 'steal'
 }
@@ -365,17 +368,18 @@ function applyBrowserTools(ctx: Context, controller: BridgeController): void {
 			+ 'disabled or no browser is connected.\n\n'
 			+ 'SHARING THE BROWSER WITH THE USER: by default (focusPolicy=preserve) the tools never '
 			+ 'activate a tab or focus a window, so the user can keep working while you operate. '
-			+ 'Reads (browser_read, browser_evaluate, browser_snapshot, screenshots) are always '
-			+ 'background-safe. Actions that normally need foreground input are re-routed: an '
-			+ 'affected result carries inputDegraded (e.g. "dom-synthetic", "fill-instead-of-type") '
-			+ 'meaning it was synthesised in-page rather than delivered as a trusted OS event. '
-			+ 'Treat inputDegraded as a signal, not a failure: check the returned state (value, '
-			+ 'formSubmitted, page change) before assuming the action did not land, and only '
-			+ 'retry with focusPolicy="steal" when a widget provably ignores synthetic events '
-			+ '(isTrusted gates, native browser shortcuts, canvas/pointer-drag interactions) — '
-			+ 'that retry interrupts whatever the user is doing, so prefer tabId-targeted reads '
-			+ 'or asking the user first. browser_tabs activate and an explicit active:true on '
-			+ 'browser_tabs open are always respected as deliberate foreground requests.\n\n'
+			+ 'This costs you almost nothing: reads are background-safe, and typing is too — '
+			+ 'browser_type(mode:"type") and browser_press deliver REAL keystrokes to a background '
+			+ 'tab, because CDP key events do not require the tab to be in front. The one genuine '
+			+ 'trade-off is clicking: a trusted mouse event lands at viewport coordinates and so '
+			+ 'needs the tab rendered in front, so preserve dispatches a DOM click and marks the '
+			+ 'result inputDegraded:"dom-synthetic" (isTrusted is false, overlays are not '
+			+ 'hit-tested). Treat that marker as a signal, not a failure: check the returned state '
+			+ '(value, formSubmitted, page change) or pass expect, and only retry with '
+			+ 'focusPolicy="steal" when a widget provably ignores synthetic clicks — that retry '
+			+ 'interrupts whatever the user is doing, so prefer reading over re-clicking. '
+			+ 'browser_tabs activate and an explicit active:true on browser_tabs open are always '
+			+ 'respected as deliberate foreground requests.\n\n'
 			+ 'WHAT CANNOT BE AUTOMATED: Chrome blocks the debugger protocol on two classes of '
 			+ 'page, so no browser_* read or click will ever work on them. This is a browser '
 			+ 'security boundary, not a transient failure — never retry it: (1) another '

@@ -41,14 +41,17 @@ export interface Config {
     /**
      * How much the agent is allowed to disturb the user's browsing.
      *
-     * - `preserve` (default): keep the user's active tab and focused window
-     *   untouched. Commands that would need OS focus are re-routed to
-     *   DOM-synthetic equivalents, and say so in their result
-     *   (`inputDegraded`), so the caller knows the click/keypress was not a
-     *   trusted input event.
-     * - `steal`: the upstream behaviour — activate the target tab and focus its
-     *   window so real CDP input events land. Maximum fidelity, at the cost of
-     *   yanking the user's view.
+     * - `preserve` (default): never activate a tab or focus a window, so the
+     *   user keeps working. This costs less than it sounds, because it was
+     *   MEASURED that CDP key events reach a background tab: browser_type's
+     *   'type' mode and browser_press deliver real keystrokes without any
+     *   activation, and reads never needed it. Only clicking is affected —
+     *   a trusted mouse event is placed in viewport coordinates and so needs the
+     *   tab rendered in front, so `preserve` dispatches a DOM click instead and
+     *   reports `inputDegraded: "dom-synthetic"` (untrusted, no hit test).
+     * - `steal`: activate the target tab and focus its window, so even clicking
+     *   uses a real mouse event at real coordinates. Use it when a page provably
+     *   ignores synthetic clicks — but it yanks the user's view.
      */
     focusPolicy?: 'preserve' | 'steal';
 }

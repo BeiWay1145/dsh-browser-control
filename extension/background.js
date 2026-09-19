@@ -1081,21 +1081,20 @@ async function cmdInput(params) {
 	// keystroke) so stateful components (React-controlled, search bars with
 	// internal suggestion state) observe every character. 'fill' (default)
 	// sets the value directly — fast, but bypasses component keystroke logic.
-	let mode = params.mode === 'type' ? 'type' : 'fill';
-	// Real key events require the tab to have OS-level focus; activating is the
-	// only way to get it. Under 'preserve' we refuse to steal the tab and fall
-	// back to fill mode, which sets the value directly and works on a background
-	// tab — correctness for keystroke-sensitive components is traded away, and
-	// the result says so rather than pretending the request was honoured.
-	let inputDegraded;
-	if (mode === 'type') {
-		if (mayStealFocus(params)) {
-			await activateTabWindow(tab.id);
-		} else {
-			mode = 'fill';
-			inputDegraded = 'fill-instead-of-type';
-		}
-	}
+	const mode = params.mode === 'type' ? 'type' : 'fill';
+	// MEASURED — this reverses an earlier assumption. CDP key events do NOT need
+	// the tab to be foreground: both Input.insertText and Input.dispatchKeyEvent
+	// reach a background tab's focused element. Verified by dispatching into a
+	// non-active tab and watching the page's own keydown listener fire
+	// (["A","B","C"]) while the user's tab stayed active throughout. Only
+	// COORDINATE-based input (Input.dispatchMouseEvent, i.e. click) requires the
+	// tab to be rendered in front, because viewport coordinates are otherwise
+	// meaningless.
+	//
+	// So typing neither steals focus nor degrades: 'type' keeps real keystrokes
+	// under 'preserve'. Activating stays available for pages whose handlers check
+	// isTrusted or read layout on every keystroke.
+	if (mayStealFocus(params)) await activateTabWindow(tab.id);
 
 	// Locate + focus + clear in one evaluate, shared by both modes.
 	const located = await withCDP(tab.id, (send) => send('Runtime.evaluate', {
@@ -1166,10 +1165,6 @@ async function cmdInput(params) {
 			tabId: tab.id,
 			mode,
 			filled: result,
-			...(inputDegraded === undefined ? {} : {
-				inputDegraded,
-				degradedReason: "focusPolicy=preserve: 'type' mode needs OS focus, so the value was set directly (fill). Keystroke-level handlers did not run. Set focusPolicy=steal to force real typing.",
-			}),
 			...(expected === undefined ? {} : { expected }),
 		};
 		});
@@ -1232,50 +1227,10 @@ async function cmdPress(params) {
 	const key = String(params.key ?? '');
 	if (key.length === 0) throw new Error('params.key is required');
 	const tab = await resolveTab(params.tabId);
-	// Key events need OS focus; a background tab swallows them silently. Under
-	// 'preserve' we synthesise the KeyboardEvent in-page instead — the focused
-	// element receives it, but it is untrusted, so handlers gated on isTrusted
-	// (and native browser shortcuts) will not react. Reported, not hidden.
-	if (!mayStealFocus(params)) {
-		const mods = (params.modifiers ?? []).map(m => String(m).toLowerCase());
-		return withCDP(tab.id, async (send) => {
-			const synthetic = await send('Runtime.evaluate', {
-				expression: `(() => {
-					const target = document.activeElement || document.body;
-					if (!target) return null;
-					const init = { key: ${JSON.stringify(key)}, bubbles: true, cancelable: true,
-						ctrlKey: ${mods.includes('ctrl') || mods.includes('control')},
-						altKey: ${mods.includes('alt')}, shiftKey: ${mods.includes('shift')},
-						metaKey: ${mods.includes('meta') || mods.includes('command')} };
-					const ev = new KeyboardEvent('keydown', init);
-					const notCancelled = target.dispatchEvent(ev);
-					let submitted = false;
-					// Mirror the implicit form submission a real Enter keyDown performs.
-					if (notCancelled && ${JSON.stringify(key)} === 'Enter') {
-						const form = target.form || (target.closest && target.closest('form'));
-						if (form) { form.requestSubmit ? form.requestSubmit() : form.submit(); submitted = true; }
-					}
-					target.dispatchEvent(new KeyboardEvent('keyup', init));
-					return { target: target.tagName ? target.tagName.toLowerCase() : 'unknown', submitted };
-				})()`,
-				awaitPromise: false, returnByValue: true, userGesture: true,
-			}).then((res) => {
-				if (res.exceptionDetails) throw new Error(res.exceptionDetails.text);
-				return res.result.value;
-			});
-			if (!synthetic) throw new Error('no active element to receive the key');
-			const expected = params.expect ? await runExpectation(send, params.expect) : undefined;
-			return {
-				tabId: tab.id, key,
-				receivedBy: synthetic.target,
-				...(synthetic.submitted ? { formSubmitted: true } : {}),
-				inputDegraded: 'dom-synthetic',
-				degradedReason: 'focusPolicy=preserve: dispatched an untrusted KeyboardEvent in-page instead of a real key event (isTrusted is false; browser-level shortcuts do not fire). Set focusPolicy=steal to force real input.',
-				...(expected === undefined ? {} : { expected }),
-			};
-		});
-	}
-	await activateTabWindow(tab.id);
+	// MEASURED: CDP key events reach a background tab, so this no longer needs the
+	// tab in front. Activating is kept only for an explicit 'steal' request (a
+	// page whose handler checks isTrusted, or a native browser shortcut).
+	if (mayStealFocus(params)) await activateTabWindow(tab.id);
 	let keyCode, code;
 	if (KEY_CODES[key]) { [keyCode, code] = KEY_CODES[key]; }
 	else if (key.length === 1) {
