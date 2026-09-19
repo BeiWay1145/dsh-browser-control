@@ -1010,6 +1010,24 @@ async function cmdClick(params) {
 	// 'steal' pulls the tab to the front — which matters for a page that gates
 	// on document.hasFocus() or on visibilitychange, nothing else.
 	if (mayStealFocus(params)) await activateTabWindow(tab.id);
+
+	// Upstream threw `window_minimized` here, which told the user what to do.
+	// Removing the activation dropped that signal and left a silent ~5s stall
+	// instead, so restore the DIAGNOSIS without the fix-up: we still never
+	// restore the window ourselves (that would un-maximize it and take the
+	// screen), but the caller now learns why the click is slow.
+	let windowWarning;
+	try {
+		const t = await chrome.tabs.get(tab.id);
+		const w = await chrome.windows.get(t.windowId);
+		if (w.state === 'minimized') {
+			windowWarning = 'window_minimized: the browser window is minimized, so this tab cannot '
+				+ 'be activated and Input.dispatchMouseEvent waits ~5s before delivering. The click '
+				+ 'still lands; restore the window to make clicks immediate. Automation never '
+				+ 'restores or resizes the window itself.';
+		}
+	} catch { /* window vanished mid-call; the dispatch below reports it */ }
+
 	return withCDP(tab.id, async (send) => {
 		const hit = await send('Runtime.evaluate', {
 			expression: `(() => {
@@ -1049,6 +1067,7 @@ async function cmdClick(params) {
 			// fallback this was hardcoded false, because nothing was hit-tested.)
 			hitVerified: hit.isTop,
 			...(hit.isTop ? {} : { hitInstead: hit.hitTag }),
+			...(windowWarning === undefined ? {} : { warning: windowWarning }),
 			...(expected === undefined ? {} : { expected }),
 			dialogsAnswered: dialogLog.filter((d) => d.tabId === tab.id && Date.now() - d.t < 5000).length,
 		};
@@ -1069,9 +1088,11 @@ async function cmdInput(params) {
 	// reach a background tab's focused element. Verified by dispatching into a
 	// non-active tab and watching the page's own keydown listener fire
 	// (["A","B","C"]) while the user's tab stayed active throughout. Only
-	// COORDINATE-based input (Input.dispatchMouseEvent, i.e. click) requires the
-	// tab to be rendered in front, because viewport coordinates are otherwise
-	// meaningless.
+	// Mouse input is the one case with a real caveat, and it is about the
+	// WINDOW, not the tab: on a MINIMIZED window the tab cannot be activated, and
+	// Input.dispatchMouseEvent waits for activation before delivering — measured
+	// at a flat ~5000ms per click (5019ms) versus ~6ms on a restored window.
+	// Key input is unaffected either way.
 	//
 	// So typing neither steals focus nor degrades: 'type' keeps real keystrokes
 	// under 'preserve'. Activating stays available for pages whose handlers check
