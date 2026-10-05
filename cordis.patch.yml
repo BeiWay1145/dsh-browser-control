@@ -2,7 +2,7 @@
 # Enable via Settings -> Plugins -> DSH Browser Control.
 - insert:
     - id: browser-bridge
-      name: '@caob23/dsh-browser-control'
+      name: '@beiway1145/dsh-browser-control'
       config:
         enabled: false
         port: 9777

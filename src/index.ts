@@ -21,13 +21,58 @@ import path from 'node:path'
 import { FiberState, type Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { JsonValue } from '@deepseek-ai/dsh-tools'
-import type { SettingsScope } from '@deepseek-ai/dsh-settings'
+import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-invariants'
 import { BridgeServer, cleanupArtifacts } from './server.ts'
 
+/**
+ * A JSON-serializable value.
+ *
+ * Declared locally on purpose. `@deepseek-ai/dsh-tools` re-exported this type
+ * through the 0.1.x line and stopped in 0.2.0, where it moved to
+ * `@deepseek-ai/dsh-util-values` — a merely transitive dependency of dsh-tools, so
+ * pnpm's strict layout does not make it resolvable from here (and importing it
+ * would fail outright on a 0.1.x host, where that package does not exist). Every
+ * use in this file is a `Record<string, JsonValue>` over a tool result, where
+ * structural typing makes a local alias interchangeable with the kernel's, so one
+ * declaration keeps this source compiling against both generations.
+ */
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
+
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'browser-bridge'
+
+/**
+ * A namespace-scoped settings section, as returned by the 0.1.x
+ * `settings.register(ns, schema, options)`.
+ *
+ * Declared structurally rather than imported: `@deepseek-ai/dsh-settings` exported
+ * this type through the 0.1.x line and dropped it in 0.2.0, where the settings
+ * service became `SettingsForms`. An `import type` would fail to compile against
+ * 0.2.0 even though the legacy branch below is only ever taken at runtime on 0.1.x.
+ */
+interface SettingsScope<T> {
+	get(): T
+	watch(callback: () => void): () => void
+}
+
+/**
+ * The two shapes the Cordis `settings` service has shipped, both optional so a
+ * runtime can be probed with `typeof service.x === 'function'`.
+ *
+ * - 0.1.x: `register` creates the namespace section the plugin reads and watches.
+ * - 0.2.0+: `register` is gone (upstream card DSH-0.1.7-J1-04, breaking/required);
+ *   config is profile-owned and arrives through the cordis `config` parameter,
+ *   and `configure` only records this entry's settings-page policy.
+ */
+interface SettingsServiceLike {
+	register?(
+		ns: string,
+		schema: typeof Config,
+		options: { base: Config; validate?: (value: Config) => void },
+	): SettingsScope<Config>
+	configure?(presentation: { auto?: boolean }, owner?: unknown): () => void
+}
 
 /** The tool registry this plugin contributes `browser_*` tools to. */
 export const inject = ['tools', 'systemPrompt']
@@ -1018,42 +1063,78 @@ export function apply(ctx: Context, config: Config): void {
 	const controller = new BridgeController(line => ctx.logger.info(line))
 
 	let current: () => ResolvedConfig = () => resolved
-	// Equivalent of @deepseek-ai/dsh-settings' `installSettingsSection`, inlined so
-	// the plugin still loads on dsh-settings builds that predate the helper. The
-	// underlying `sctx.settings.register` API is the one stable across every
-	// dsh-settings version a consumer is realistically pinned to.
+	// Settings wiring, written to survive BOTH generations of the settings service.
+	//
+	// An earlier revision of this file called `sctx.settings.register(...)` directly
+	// and asserted it was "the one stable API across every dsh-settings version a
+	// consumer is realistically pinned to". That held through the 0.1.x line and
+	// does NOT hold for 0.2.0: upstream card DSH-0.1.7-J1-04 (breaking/required)
+	// removes `register` and the `SettingsScope` type, replacing them with
+	// `SettingsForms`, whose `configure({ auto }, owner)` only records a
+	// settings-page policy. Verified against the shipped artifacts:
+	//   dsh-settings@0.1.5-rc.2  has `register(ns, schema)`
+	//   dsh-settings@0.2.0-rc.2  does not; it exports `SettingsForms`/`configure`
+	// On 0.2.0 the old call would throw inside this inject callback, and a
+	// throw there costs every `browser_*` tool — the exact outage this plugin must
+	// not suffer. Hence feature detection rather than a version check, and a
+	// containment boundary around the whole block.
+	//
+	// What replaces `get()`/`watch()` on 0.2.0: nothing needs to. Config is
+	// profile-owned there (it lives in the profile's cordis.patch.yml under this
+	// entry's id) and reaches `apply` through the cordis `config` parameter, which
+	// `current` already falls back to; a live edit re-applies the entry, and the
+	// activation-time reconcile at the end of this function runs again with it.
 	ctx.inject(['settings'], (sctx) => {
-		const scope = (sctx.settings.register as (
-			ns: string,
-			schema: typeof Config,
-			options: { base: Config; validate?: (value: Config) => void },
-		) => SettingsScope<Config>)(
-			BROWSER_BRIDGE_SETTINGS_NAMESPACE,
-			Config,
-			{
-				base: config,
-				validate: (value) => {
-					if (value.enabled && (value.token ?? '').trim().length === 0) {
-						throw new Error('browser-bridge: token must be a non-empty string when enabled')
-					}
-				},
-			},
-		)
-		current = () => scope.get() as ResolvedConfig
-		ctx.effect(() => () => {
-			// Mirror `isUnloading` from dsh-settings (private): the fiber's own
-			// unload path runs the disposer too, and there re-applying the
-			// composition entry and firing `onChange` would re-register routes
-			// against a fiber whose resources are being released.
-			if (ctx.fiber.state === FiberState.DISPOSED || ctx.fiber.state === FiberState.UNLOADING) return
-			current = () => resolved
+		const service = sctx.settings as unknown as SettingsServiceLike
+		try {
+			if (typeof service.register === 'function') {
+				// 0.1.x: namespace-scoped section with a live `get()` and a `watch()`.
+				const scope = service.register(
+					BROWSER_BRIDGE_SETTINGS_NAMESPACE,
+					Config,
+					{
+						base: config,
+						validate: (value: Config) => {
+							if (value.enabled && (value.token ?? '').trim().length === 0) {
+								throw new Error('browser-bridge: token must be a non-empty string when enabled')
+							}
+						},
+					},
+				)
+				current = () => scope.get() as ResolvedConfig
+				ctx.effect(() => () => {
+					// Mirror `isUnloading` from dsh-settings (private): the fiber's own
+					// unload path runs the disposer too, and there re-applying the
+					// composition entry and firing `onChange` would re-register routes
+					// against a fiber whose resources are being released.
+					if (ctx.fiber.state === FiberState.DISPOSED || ctx.fiber.state === FiberState.UNLOADING) return
+					current = () => resolved
+					void controller.reconcile(current())
+				}, 'browser-bridge: settings cleanup')
+				void controller.reconcile(current())
+				scope.watch(() => {
+					if (ctx.fiber.state === FiberState.DISPOSED || ctx.fiber.state === FiberState.UNLOADING) return
+					void controller.reconcile(current())
+				})
+				return
+			}
+			if (typeof service.configure === 'function') {
+				// 0.2.0+: no namespace to own — just claim the auto-generated settings
+				// page for this entry so the plugin stays configurable from the UI.
+				sctx.effect(
+					() => service.configure!({ auto: false }, ctx.fiber),
+					'browser-bridge: settings page policy',
+				)
+				void controller.reconcile(current())
+				return
+			}
+			// Neither shape: cordis `config` alone still drives the bridge.
+			ctx.logger.info('browser-bridge: settings service exposes neither register() nor configure(); using the cordis config only')
 			void controller.reconcile(current())
-		}, 'browser-bridge: settings cleanup')
-		void controller.reconcile(current())
-		scope.watch(() => {
-			if (ctx.fiber.state === FiberState.DISPOSED || ctx.fiber.state === FiberState.UNLOADING) return
-			void controller.reconcile(current())
-		})
+		} catch (error) {
+			// A settings service that refuses us must not cost the browser tools.
+			ctx.logger.info(`browser-bridge: settings wiring skipped (${errorMessage(error)})`)
+		}
 	})
 
 	// Activation converges loudly so a bad port fails the plugin at load;
