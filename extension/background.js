@@ -986,6 +986,9 @@ async function cmdFind(params) {
 	return { tabId: tab.id, selector: params.selector, ...payload };
 }
 
+/** A click whose CDP dispatch takes at least this long is reported as slow. */
+const SLOW_CLICK_MS = 1000
+
 async function cmdClick(params) {
 	if (!params.selector) throw new Error('params.selector is required');
 	const tab = await resolveTab(params.tabId);
@@ -1011,22 +1014,19 @@ async function cmdClick(params) {
 	// on document.hasFocus() or on visibilitychange, nothing else.
 	if (mayStealFocus(params)) await activateTabWindow(tab.id);
 
-	// Upstream threw `window_minimized` here, which told the user what to do.
-	// Removing the activation dropped that signal and left a silent ~5s stall
-	// instead, so restore the DIAGNOSIS without the fix-up: we still never
-	// restore the window ourselves (that would un-maximize it and take the
-	// screen), but the caller now learns why the click is slow.
-	let windowWarning;
-	try {
-		const t = await chrome.tabs.get(tab.id);
-		const w = await chrome.windows.get(t.windowId);
-		if (w.state === 'minimized') {
-			windowWarning = 'window_minimized: the browser window is minimized, so this tab cannot '
-				+ 'be activated and Input.dispatchMouseEvent waits ~5s before delivering. The click '
-				+ 'still lands; restore the window to make clicks immediate. Automation never '
-				+ 'restores or resizes the window itself.';
-		}
-	} catch { /* window vanished mid-call; the dispatch below reports it */ }
+	// A PROBED precondition used to live here: warn when
+	// chrome.windows.get(tab.windowId).state === 'minimized'. That was a
+	// mis-diagnosis and it is removed. A minimized window does stall clicks, but
+	// only as one case of the real condition: the tab has NEVER been the active
+	// tab. Such a tab has no composited surface, and Chromium makes
+	// Input.dispatchMouseEvent wait for one, capped at ~5s per event. Measured on
+	// Edge 151 with the window NOT minimized:
+	//   fresh background tab, never activated       5024ms, 5022ms (two clicks)
+	//   same tab after ONE activation, now background    9ms,   15ms
+	//   a second fresh background tab               5034ms
+	// So the warning below keys off the MEASURED dispatch latency instead of a
+	// probed precondition. That cannot mis-attribute the cause, and it has no
+	// false positives: it fires exactly when a click was in fact slow.
 
 	return withCDP(tab.id, async (send) => {
 		const hit = await send('Runtime.evaluate', {
@@ -1054,9 +1054,14 @@ async function cmdClick(params) {
 		// held, 0 = none). Chrome tolerates its absence, but supplying it makes
 		// the sequence match a real mouse and matters to pages that read
 		// `event.buttons` (drag-adjacent UI, canvas drawing).
+		// Timed because this is the one input path that can stall; see the note above
+		// cmdClick. `expect` is deliberately outside the window: it polls on purpose,
+		// so including it would report every legitimate wait as a slow click.
+		const dispatchStarted = Date.now();
 		await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: hit.x, y: hit.y, buttons: 0 });
 		await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: hit.x, y: hit.y, button: 'left', buttons: 1, clickCount });
 		await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: hit.x, y: hit.y, button: 'left', buttons: 0, clickCount });
+		const dispatchMs = Date.now() - dispatchStarted;
 		const expected = params.expect ? await runExpectation(send, params.expect) : undefined;
 		return {
 			tabId: tab.id,
@@ -1067,7 +1072,15 @@ async function cmdClick(params) {
 			// fallback this was hardcoded false, because nothing was hit-tested.)
 			hitVerified: hit.isTop,
 			...(hit.isTop ? {} : { hitInstead: hit.hitTag }),
-			...(windowWarning === undefined ? {} : { warning: windowWarning }),
+			...(dispatchMs >= SLOW_CLICK_MS ? {
+				warning: `slow_click: dispatching the mouse events took ${dispatchMs}ms. The click landed, `
+					+ 'but a tab that has never been the active tab has no composited surface yet, and '
+					+ 'Chromium makes Input.dispatchMouseEvent wait for one (capped at ~5s per event). '
+					+ 'Once such a tab has been shown once, later clicks are immediate even in the '
+					+ 'background. To avoid the wait, let this tab be activated once (browser_tabs '
+					+ 'activate, or open it with active:true), or pass focusPolicy:"steal" for this call. '
+					+ 'Under focusPolicy=preserve automation never activates a tab on its own.',
+			} : {}),
 			...(expected === undefined ? {} : { expected }),
 			dialogsAnswered: dialogLog.filter((d) => d.tabId === tab.id && Date.now() - d.t < 5000).length,
 		};

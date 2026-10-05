@@ -78,3 +78,32 @@ Chrome 在 attach 时按 scheme 做白名单校验，**两类目标永久拒绝�
 - 需要用户在该页操作时，给出**一条具体指令**（如「请在 Tampermonkey 页面点『安装』」），然后继续推进其余步骤。
 
 **已评估且不成立的绕过路径**（不必再试）：`chrome.scripting.executeScript` 注入（同样受 host 限制，且无法注入其他扩展页）；`chrome.debugger` 先 attach `chrome://extensions` 再间接操作（该页本身即被拒）。
+
+## 点击延迟与 `slow_click` 告警
+
+`browser_click` 可能在返回体中附带 `warning: "slow_click: …"`。
+
+**触发条件**：CDP 三次鼠标事件（mouseMoved/mousePressed/mouseReleased）的**实测派发总耗时** ≥ `SLOW_CLICK_MS`（1000ms）。
+计时**故意不包含 `expect`** —— 那是主动轮询，算进去会把每一次正常等待都报成慢点击。
+
+**真实原因**（实测；与窗口是否最小化**无关**）：目标标签**从未成为过活跃标签**时尚无合成表面，
+`Input.dispatchMouseEvent` 会等待其建立，**每个事件上限约 5s**。
+
+| 条件 | 实测 click 延迟 |
+|---|---|
+| 全新后台标签（从未激活），连点两次 | **5024ms / 5022ms** |
+| 同一标签曾激活一次、现已转回后台 | **9ms / 15ms** |
+| 标签活跃 | 5–8ms |
+| `evaluate` / `press` / `scroll`（非活跃） | 4–5ms（**不受影响**） |
+
+**为什么按实测而非探测**：「标签是否渲染过」不存在可直接查询的状态——只能靠 `onActivated` 事后记录，
+会漏掉扩展启动前就已激活的标签，探测必然误报。按实测耗时告警**零误报**，且不可能错误归因。
+（早前曾探测「窗口最小化」，实测证明那是**错误归因**，已移除。）
+
+**`slow_click` 不代表失败**：事件仍然送达，`hitVerified` 照常判定。要去掉等待，三选一：
+
+1. 让该标签被激活一次（`browser_tabs activate`，或以 `active:true` 打开）——**此后该标签永远毫秒级，即使转回后台**；
+2. 该次调用传 `focusPolicy:"steal"`；
+3. 接受它：`preserve` 模式下自动化**不会**自行激活标签——这正是该模式的取舍，不为省几秒去抢用户屏幕。
+
+> `steal` 模式下若窗口最小化，仍由 upstream 的 `window_minimized` 报错拦下（无法激活即无法给出可信输入）。
