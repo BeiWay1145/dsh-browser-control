@@ -56,7 +56,7 @@ Browsers via MCP (Playwright MCP, Puppeteer MCP, browser-use…) share one trait
 | Environment deps | No Node / npx / Python needed | Needs npx or uvx runtime |
 | Setup | Load extension + settings toggle | Edit MCP client JSON config |
 | Disk usage | Reuses existing Chrome, zero extra | Downloads hundreds of MB |
-| Integration depth | Native dsh plugin (settings card / status page / cleanup button) | Generic MCP server |
+| Integration depth | Native dsh plugin (status page / cleanup button; whether a settings card exists depends on the host version, see below) | Generic MCP server |
 
 In one line: **for "use MY browser" tasks (logged-in Bilibili, Zhihu, admin panels), use this project; for generic cross-browser test automation, use MCP.**
 
@@ -155,13 +155,24 @@ Then add three pieces of config:
 { "path": "./packages/web/browser-bridge" }
 ```
 
-Restart dsh → the "DSH Browser Control" card appears in Settings → enable it. Details in [dsh-config/README.md](dsh-config/README.md).
+Restart dsh. Details in [dsh-config/README.md](dsh-config/README.md) (this path targets the pre-v1.0.3 layout, where `enabled: false` really was the default).
 
 ## Usage
 
-1. dsh Settings → Plugins → DSH Browser Control → enable
+1. It is already on after install (v1.0.6+); no manual enable step
 2. The extension connects automatically (port 9777, default token dsh-local)
 3. Talk in natural language; the agent drives the browser
+
+### Whether a settings card exists depends on the host (issue #5)
+
+The published bundle ships only the host-side `lib/index.js`; there is no browser-side module, so the card is not drawn by this plugin:
+
+| Host | Settings page | How to change config |
+|---|---|---|
+| dsh 0.1.7+ / 0.2.x (dsh-settings 0.1.7-rc.2 onwards) | Yes — the host projects this plugin's own `Config` schema into a section | Settings page, or the profile override layer |
+| dsh 0.1.2 and earlier | No entry (no client half claims the namespace, so nothing renders) | Profile override layer only: `$DSH_HOME/profiles/<name>/cordis.patch.yml` |
+
+The config file works on both; see [dsh-config/README.md](dsh-config/README.md).
 
 Visit `http://127.0.0.1:9777/` for connection status.
 
@@ -220,9 +231,11 @@ Chrome browser
 |---|---|
 | Baidu search → extract result titles | ✅ |
 | Bilibili user search → send DM | ✅ |
-| Bilibili search → count video cards + screenshot | ✅ |
-| Unit tests 29/29 | ✅ |
-| Type checks (host + client) | ✅ |
+| Bilibili search → count video cards + screenshot | ✅ (real browser, 1.0.x era) |
+| `npm run verify` harness: config resolution, three host shapes, HTTP auth and upgrade origin, published-bundle behaviour | ✅ 2026-10-10, see [verify/README.md](verify/README.md) |
+| `tsc --noEmit` + `publint` | ✅ 2026-10-10 |
+
+There have been no unit tests since v1.0.4 removed `tests/`; the three browser rows above are historical runs that were not repeated for this change, while every claim in this release comes from the repeatable harness under `verify/`.
 
 ## Changelog
 

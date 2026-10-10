@@ -158,7 +158,7 @@ class BridgeController {
 		const server = this.server
 		if (server === undefined) {
 			throw new Error(
-				this.lastError ?? '浏览器控制未启用 —— 到 dsh 设置 → 插件 → DSH 浏览器控制 打开开关',
+				this.lastError ?? '浏览器控制未启用 —— 在 profile 的 cordis.patch.yml 里给 browser-bridge 配 enabled: true（dsh 0.1.7+ 的宿主也会在设置 → 插件 自动列出本插件开关；0.1.2 及更早的宿主没有这张卡片，只能改配置文件）',
 			)
 		}
 		return server.execute(command, params, { signal })

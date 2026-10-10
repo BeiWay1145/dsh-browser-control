@@ -5,3 +5,4 @@ lib/tsconfig.tsbuildinfo
 *.crx
 .DS_Store
 *.tmp
+dsh-browser-shots/

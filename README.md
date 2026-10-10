@@ -56,7 +56,7 @@ Chrome 扩展（CDP 驱动）
 | 环境依赖 | 无需 Node / npx / Python | 需要 npx 或 uvx 运行时 |
 | 接入方式 | 加载扩展 + 设置页开关 | 编辑 MCP 客户端 JSON 配置 |
 | 磁盘占用 | 复用现有 Chrome，零新增 | 额外下载数百 MB 浏览器 |
-| 集成深度 | dsh 原生插件（设置卡片 / 状态页 / 清理按钮） | 通用 MCP server |
+| 集成深度 | dsh 原生插件（状态页 / 清理按钮；设置页卡片由宿主版本决定，见下） | 通用 MCP server |
 
 一句话：**要 AI 用"你自己的"浏览器干活（已登录的 B 站、知乎、淘宝后台），用本项目；要做跨浏览器、跨应用的通用自动化测试，用 MCP。**
 
@@ -154,13 +154,24 @@ git checkout v1.0.2   # 旧布局在 v1.0.2 tag
 { "path": "./packages/web/browser-bridge" }
 ```
 
-重启 dsh → 设置页出现「DSH 浏览器控制」→ 开启即可。详细说明见 [dsh-config/README.md](dsh-config/README.md)。
+重启 dsh。详细说明见 [dsh-config/README.md](dsh-config/README.md)（注意这一条路径针对 v1.0.2 及以前的旧布局，当时的默认就是 `enabled: false`）。
 
 ## 使用
 
-1. dsh 设置 → 插件 → DSH 浏览器控制 → 开启
+1. 装好即默认开启（v1.0.6+），不需要手动启用
 2. Chrome 扩展自动连接（端口 9777，Token 默认 dsh-local）
 3. 对话说自然语言，Agent 自动操控浏览器
+
+### 「设置 → 插件」里有没有这张卡片，取决于宿主版本（issue #5）
+
+npm 发布的 bundle 只含宿主侧 `lib/index.js`，没有浏览器端模块，所以卡片不是插件自己画的：
+
+| 宿主 | 设置页 | 改配置的办法 |
+|---|---|---|
+| dsh 0.1.7+ / 0.2.x（dsh-settings 0.1.7-rc.2 起） | 有——宿主按插件自身 `Config` schema 自动投影出这一节 | 设置页，或 profile 覆盖层 |
+| dsh 0.1.2 及更早 | 没有条目（没有客户端半区认领命名空间，宿主就不渲染） | 只能改 profile 覆盖层 `$DSH_HOME/profiles/<名字>/cordis.patch.yml` |
+
+两边都能改的就是配置文件，写法见 [dsh-config/README.md](dsh-config/README.md)。
 
 访问 `http://127.0.0.1:9777/` 查看连接状态。
 
@@ -217,11 +228,13 @@ Chrome 浏览器
 
 | 场景 | 结果 |
 |---|---|
-| 百度搜索 → 提取结果标题 | ✅ |
-| B 站搜索用户 → 发私信 | ✅ |
-| B 站搜索 → 统计视频卡片 + 截图 | ✅ |
-| 单元测试 29/29 | ✅ |
-| 类型检查（host + client） | ✅ |
+| 百度搜索 → 提取结果标题 | ✅（1.0.x 时期实机） |
+| B 站搜索用户 → 发私信 | ✅（1.0.x 时期实机） |
+| B 站搜索 → 统计视频卡片 + 截图 | ✅（1.0.x 时期实机） |
+| 实测台 `npm run verify`：配置解析、三种宿主形状、HTTP 鉴权与升级来源、发布产物行为 | ✅ 2026-10-10，见 [verify/README.md](verify/README.md) |
+| `tsc --noEmit` + `publint` | ✅ 2026-10-10 |
+
+仓库自 v1.0.4 起不再有单测目录，上面三条浏览器场景是历史实机记录，本版未重跑；本版结论都来自 `verify/` 里可重复执行的实测台。
 
 ## 更新日志
 
