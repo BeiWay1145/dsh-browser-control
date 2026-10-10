@@ -1,6 +1,9 @@
 # 更新日志
 
-## Unreleased
+## v1.0.8 (2026-10-10)
+
+- 发布资产修了两处（自查）：v1.0.7 的 `dsh-browser-control-plugin-v1.0.7.zip` 和扩展包一样带 multipart 前言（实测头 4 字节 `2d2d2d2d`，不是 `PK\x03\x04`，资源管理器拒展开——#2 里「压缩包还是有问题」的另一半原因），并且**缺 `cordis.patch.yml`**，而 `package.json` 的 `dsh.bundle.patch` 正指向它，从这份离线包安装等于没挂载插件。本版两份资产都重新打包并附 `.sha256`。
+- 兼容提示（**行为变更，升级前先看**）：`/api/command`、`/api/cleanup` 现在必须带 Token，任何脚本化调用都要改；`Access-Control-Allow-Origin: *` 全部移除。
 
 - 修复 #5：文档不再承诺 npm bundle 一定有「设置 → 插件」卡片。README（中英）与 `dsh-config/README.md` 改为按宿主版本分述：dsh 0.1.7+/0.2.x（dsh-settings 0.1.7-rc.2 起）由宿主按插件自身 `Config` schema 自动投影出设置节，看得到也改得动；0.1.2 及更早没有客户端半区认领命名空间，卡片不渲染，配置只能走 profile 覆盖层。桥接未启用时工具报错的文案也不再指向可能不存在的设置入口（`src/index.ts`）。
 - 新增 `verify/`：五个纯 node 实测台（配置解析、三种宿主形状的 `apply()`、HTTP 鉴权与升级来源、发布产物行为、README 资产死链），`npm run verify` 一条命令跑完，用法与副作用记在 `verify/README.md`。顺带纠正 README「已验证」里那条早已不存在的「单元测试 29/29」（`tests/` 在 v1.0.4 就删了），并把历史浏览器场景与本版实测分开标注。

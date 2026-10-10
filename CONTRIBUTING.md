@@ -33,8 +33,10 @@ node verify/verify_release_links.mjs /tmp/releases.json
 1. 同步版本号：`package.json` 与 `extension/manifest.json`（改了扩展行为时）
 2. `CHANGELOG.md` 的 `Unreleased` 段落落成正式版本标题
 3. 打 tag、建 Release，资产沿用现有命名：`DSH-Browser-Control-vX.Y.Z.zip`（扩展）、`dsh-browser-control-plugin-vX.Y.Z.zip`（插件）
-4. README / README.en 的下载链接改成新名字，然后跑上面那条链接实测
-5. `npm publish`（`files` 白名单不含 `verify/` 和 `extension/`，发包前确认 `lib/` 已是最新）
+4. **插件离线包里必须有 `cordis.patch.yml`**——`package.json` 的 `dsh.bundle.patch` 指向它，v1.0.7 那份资产漏了这个文件，离线安装就等于没挂载；扩展包必须含 `extension/` 下全部文件（含 `icons/`）
+5. README / README.en 的下载链接改成新名字，然后跑上面那条链接实测
+6. 每个 zip 附一份 `.sha256` 旁文件，上传后匿名下载回来核对头 4 字节、`unzip -t` 与条目分隔符
+7. `npm publish`（`files` 白名单不含 `verify/` 和 `extension/`，发包前确认 `lib/` 已是最新）。这台机器 `~/.npmrc` 的默认源是 npmmirror 镜像，**不能发布**；包里的 `publishConfig.registry` 已写死官方源，别再依赖命令行默认值
 
 ## 写宿主适配时会踩的坑
 
