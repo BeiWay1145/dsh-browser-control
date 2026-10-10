@@ -27,6 +27,7 @@ import type { JsonValue } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-invariants'
 import type {} from '@deepseek-ai/dsh-settings'
 import { BridgeServer, cleanupArtifacts } from './server.ts'
+import { classify } from './errors.ts'
 
 /**
  * Namespace handle as returned by `sctx.settings.register` on dsh-settings up to
@@ -161,9 +162,9 @@ class BridgeController {
 	async execute(command: string, params: Record<string, unknown>, signal: AbortSignal, timeoutMs?: number): Promise<unknown> {
 		const server = this.server
 		if (server === undefined) {
-			throw new Error(
+			throw classify(command, new Error(
 				this.lastError ?? '浏览器控制未启用 —— 在 profile 的 cordis.patch.yml 里给 browser-bridge 配 enabled: true（dsh 0.1.7+ 的宿主也会在设置 → 插件 自动列出本插件开关；0.1.2 及更早的宿主没有这张卡片，只能改配置文件）',
-			)
+			))
 		}
 		return server.execute(command, params, timeoutMs === undefined ? { signal } : { signal, timeoutMs })
 	}
@@ -175,7 +176,7 @@ class BridgeController {
 	 */
 	async cleanup(): Promise<{ shotsRemoved: number; scratchRemoved: readonly string[] }> {
 		const dir = this.shotsDir
-		if (dir === undefined) throw new Error('浏览器控制尚未加载配置，无法确定清理目录')
+		if (dir === undefined) throw classify('cleanup', new Error('browser-bridge is not configured yet —— 浏览器控制尚未加载配置，无法确定清理目录'))
 		return cleanupArtifacts({ shotsDir: dir })
 	}
 

@@ -27,6 +27,7 @@ import { randomUUID, createHash, timingSafeEqual } from 'node:crypto'
 import { mkdir, readdir, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { encodeCloseFrame, encodeControlFrame, encodeTextFrame, FrameReader } from './ws.ts'
+import { BridgeError, classify } from './errors.ts'
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 /** Per-command ceiling when the caller passes none. */
@@ -226,7 +227,7 @@ export class BridgeServer {
   async execute(command: string, params: Record<string, unknown>, options: BridgeExecuteOptions = {}): Promise<unknown> {
     const socket = this.clientSocket
     if (socket === undefined) {
-      throw new Error('no browser extension connected — open the browser that has the DSH Browser Control extension installed')
+      throw classify(command, new Error('no browser extension connected — open the browser that has the DSH Browser Control extension installed'))
     }
     const timeoutMs = Math.min(MAX_COMMAND_TIMEOUT_MS, Math.max(1, options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS))
     const signal = options.signal
@@ -257,6 +258,11 @@ export class BridgeServer {
     socket.write(encodeTextFrame(JSON.stringify({ type: 'command', id, command, params })))
     try {
       return await result
+    } catch (error) {
+      // One choke point: everything above this line that can fail is a link or
+      // extension failure, and the caller needs to know whether the page may
+      // already have been changed. See src/errors.ts.
+      throw classify(command, error)
     } finally {
       clearTimeout(entry.timer)
       if (entry.onAbort !== undefined && signal !== undefined) signal.removeEventListener('abort', entry.onAbort)
@@ -393,9 +399,17 @@ export class BridgeServer {
       this.execute(parsed.command, (parsed.params ?? {}) as Record<string, unknown>, timeoutMs === undefined ? {} : { timeoutMs }).then(
         (result) => this.respondJson(res, 200, { ok: true, result }),
         (error) => {
-          const message = errorMessage(error)
-          const code = message.startsWith('no browser extension') ? 503 : 502
-          this.respondJson(res, code, { ok: false, error: message })
+          if (error instanceof BridgeError) {
+            // 503 = 现在根本没法工作；504 = 超时且结果未知；502 = 扩展报了具体失败
+            const status = error.code === 'extension_offline' || error.code === 'bridge_disabled' || error.code === 'not_configured'
+              ? 503
+              : error.code === 'command_timeout' || error.code === 'link_lost'
+                ? 504
+                : 502
+            this.respondJson(res, status, error.toJSON())
+            return
+          }
+          this.respondJson(res, 502, { ok: false, error: errorMessage(error) })
         },
       )
     })
