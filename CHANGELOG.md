@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- 修复 #3 / #6 第一步（CORS）：HTTP 面不再出现任何 `Access-Control-Allow-Origin`。原先 `handleHttp()` 的 OPTIONS 预检与 `respondJson()`（所有 JSON 响应的公共出口）都回 `*`，等于把「本机任意网页可读走桥响应」变成默认。状态页与自身 `fetch` 同源、扩展只走 WebSocket，因此直接去掉通配而不是换成白名单。实测（起真实 `BridgeServer` + 假扩展客户端）：`/api/status`、`/api/command`、`OPTIONS` 三类响应头均无 ACAO/Allow-Methods，状态页 200 正常，且同一请求确实驱动扩展执行了 `nav`（证明这是真实可达面，不是空转）。
+
 - 修复 #8：settings 接线改为特性探测。`sctx.settings.register` 只存在于 dsh-settings 0.1.2-rc.1 及更早（实测 `0.1.2-rc.1` 的 `lib/index.js:281` 有 `register`，`0.1.7-rc.2` 与 `0.2.0-rc.2` 只导出 `SettingsForms`，方法为 `configure/describe/update/replace/mutate`）。原代码在注入回调里直接调用它，新宿主上抛 `TypeError`，回调后半段的 `controller.reconcile()` 与 `scope.watch()` 一起被跳过。现在：没有 `register` 就走 profile 配置并把设置页交给宿主的自动投影（`configure({auto:true})`），`register` 抛错也有兜底，两条路径都保证桥接收敛。三种宿主形状实测（假 settings 服务）：legacy / register-throws / no-register 全部「回调不抛、9777 监听、16 个工具注册」，且 legacy 路径的实时开关回归仍成立（改 false 端口关闭、改回 true 重开）。
 - 兼容：`package.json` 的 peer/devDependencies 上界从 `<0.2.0-0` 放宽到 `<0.3.0-0`。dsh 的 `latest` 已经是 `0.2.0-rc.2`，旧上界会让新宿主装插件时 peer 解析不到；实测 `@deepseek-ai/dsh-tools@0.2.0-rc.2` 的导出面与 0.1.0-rc.8 完全一致（含 `defineTool`），放宽无运行时风险。
 - 修复（无人报告，自查发现）：`lib/` 构建产物落后于 `src/`。`0e0696c` 加完 v1.0.7 的 4 类新工具后没有重新打包，仓库里提交的 bundle 与 **npm 已发布的 `@caob23/dsh-browser-control@1.0.7` 都只注册 11 个 `browser_*` 工具**，而 README 工具表写的是 16 个——npm 安装的用户实际缺 `browser_console_log`、`browser_network_log`、`browser_network_clear`、`browser_pdf`、`browser_emulate`。已按 `src/` 重新构建，实测 `apply()` 注册满 16 个。

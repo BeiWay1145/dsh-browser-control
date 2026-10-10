@@ -264,11 +264,10 @@ export class BridgeServer {
   private handleHttp(req: http.IncomingMessage, res: http.ServerResponse): void {
     const url = new URL(req.url ?? '/', 'http://localhost')
     if (req.method === 'OPTIONS') {
-      res.writeHead(204, {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST',
-        'Access-Control-Allow-Headers': 'Content-Type',
-      })
+      // No cross-origin access is granted any more: the status page is same-origin and
+      // the extension only ever talks over the WebSocket. Answering a preflight without
+      // `Access-Control-Allow-Origin` is what makes the browser block the real request.
+      res.writeHead(204)
       res.end()
       return
     }
@@ -296,9 +295,11 @@ export class BridgeServer {
   }
 
   private respondJson(res: http.ServerResponse, statusCode: number, body: unknown): void {
+    // This is the shared exit for every JSON reply, so it is also where cross-origin
+    // access used to leak: no `Access-Control-Allow-Origin` is sent at all now.
     res.writeHead(statusCode, {
       'Content-Type': 'application/json; charset=utf-8',
-      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'no-store',
     })
     res.end(JSON.stringify(body))
   }
