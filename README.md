@@ -199,14 +199,21 @@ curl -X POST http://127.0.0.1:9777/api/command \
 | `browser_type` | 在输入框填入文本 |
 | `browser_press` | 模拟键盘按键 |
 | `browser_scroll` | 滚动页面 |
+| `browser_wait` | 等元素出现 / 等文本出现 / 等条件为真（最长 120 秒，v1.0.9+） |
+| `browser_find` | 按 CSS 选择器查元素，返回数量与位置尺寸（只读，v1.0.9+） |
+| `browser_dialog` | 读改原生弹窗应答策略 accept/dismiss/manual，并回最近弹窗记录（v1.0.9+） |
 | `browser_tabs` | 标签页管理（列表/新建/关闭/切换） |
 | `browser_evaluate` | 执行任意 JS |
 | `browser_screenshot` | 截取页面截图 |
 | `browser_console_log` | 抓取页面 console 日志（v1.0.7+） |
 | `browser_network_log` | 抓取 HTTP 请求/响应（v1.0.7+） |
+| `browser_network_clear` | 单独清空网络日志缓冲（v1.0.7+） |
 | `browser_pdf` | 当前页导出 PDF（v1.0.7+） |
 | `browser_emulate` | 切设备视口（移动 / 桌面 / 自定义，v1.0.7+） |
 | `browser_cleanup` | 清理临时文件 |
+| `browser_info` | 报告实际连上的浏览器与扩展版本（排障先跑它，v1.0.9+） |
+
+共 20 个工具。`browser_wait` / `browser_find` / `browser_dialog` / `browser_info` 在 v1.0.8 及以前是「扩展里已实现、但没注册成工具」，agent 调不到；`browser_network_clear` 则是代码里有、这张表漏了。这四条现在由 `verify/verify_surface.mjs` 做三方对账（扩展命令表 ↔ 插件调用 ↔ 文档表 ↔ 构建产物），漂移会直接让 `npm run verify` 失败。
 
 ## 架构
 

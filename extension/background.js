@@ -1194,9 +1194,10 @@ async function cmdWait(params) {
 }
 
 /**
- * Read or set the native-dialog auto-answer policy. GET: {action:'get'} →
- * {policy, recent}. SET: {action:'set', policy:'accept'|'dismiss'|'manual'}.
- * Recent dialogs (last 50) are returned so callers can verify what happened.
+ * Read or set the native-dialog auto-answer policy. Passing `policy`
+ * ('accept' | 'dismiss' | 'manual') sets it; omitting it is a read. Always
+ * returns {policy, recent} — the last 10 answered dialogs, so a caller can
+ * verify one actually fired.
  */
 async function cmdDialogPolicy(params) {
 	if (params?.policy !== undefined) {

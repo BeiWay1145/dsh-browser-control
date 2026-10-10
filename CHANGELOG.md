@@ -1,5 +1,13 @@
 # 更新日志
 
+## Unreleased
+
+- 新增 4 个工具，`browser_*` 从 16 个到 **20 个**：`browser_wait`（等元素/等文本/等页面条件，最长 120 秒）、`browser_find`（按选择器查元素，返回数量与视口矩形）、`browser_dialog`（读改原生弹窗应答策略并回最近弹窗记录）、`browser_info`（报告实际连上的浏览器与扩展版本）。四个都是**扩展里早就实现好、但一直没注册成工具**的能力，agent 之前调不到；`browser_wait` 尤其离谱——README 和 `docs/BEHAVIOR.md` 一直在宣传它，代码里根本没有。
+- 新增 `controller.execute(..., timeoutMs)`：桥接侧的超时预算可以按命令单独给。`browser_wait` 用它把预算设成「页面等待上限 + 10 秒」，保证先由页面侧报「等不到」，而不是被桥接掐断——后者会让 agent 分不清"页面慢"和"链路死"。
+- 新增 `verify/verify_surface.mjs`：四方对账（扩展 `COMMANDS` 表 ↔ 插件实际调用的命令 ↔ 两份 README 的工具表 ↔ 构建产物 `lib/index.js`），已串进 `npm run verify`。上面那四类漂移以后会在提交时暴露，而不是等用户提 issue。
+- 修正 `extension/background.js` 里 `dialog` 命令的注释：它写着 `{action:'get'|'set'}`，实现看的其实是 `policy` 字段，按注释传参会静默无效。
+- 文档：README（中英）工具表补上 `browser_wait` / `browser_find` / `browser_dialog` / `browser_info`，以及此前漏列的 `browser_network_clear`。
+
 ## v1.0.8 (2026-10-10)
 
 - 发布资产修了两处（自查）：v1.0.7 的 `dsh-browser-control-plugin-v1.0.7.zip` 和扩展包一样带 multipart 前言（实测头 4 字节 `2d2d2d2d`，不是 `PK\x03\x04`，资源管理器拒展开——#2 里「压缩包还是有问题」的另一半原因），并且**缺 `cordis.patch.yml`**，而 `package.json` 的 `dsh.bundle.patch` 正指向它，从这份离线包安装等于没挂载插件。本版两份资产都重新打包并附 `.sha256`。

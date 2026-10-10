@@ -152,16 +152,20 @@ class BridgeController {
 	 * @param command - extension command name (`nav`, `click`, …).
 	 * @param params - wire params passed through to the extension.
 	 * @param signal - tool-execution cancellation propagated to the pending command.
+	 * @param timeoutMs - per-command bridge ceiling; omit for the default. Commands
+	 *   that wait inside the page (browser_wait) must pass a value larger than their
+	 *   own page-level timeout, otherwise the bridge aborts first and the caller
+	 *   cannot tell a slow page from a dead link.
 	 * @returns the extension's result payload verbatim.
 	 */
-	async execute(command: string, params: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
+	async execute(command: string, params: Record<string, unknown>, signal: AbortSignal, timeoutMs?: number): Promise<unknown> {
 		const server = this.server
 		if (server === undefined) {
 			throw new Error(
 				this.lastError ?? '浏览器控制未启用 —— 在 profile 的 cordis.patch.yml 里给 browser-bridge 配 enabled: true（dsh 0.1.7+ 的宿主也会在设置 → 插件 自动列出本插件开关；0.1.2 及更早的宿主没有这张卡片，只能改配置文件）',
 			)
 		}
-		return server.execute(command, params, { signal })
+		return server.execute(command, params, timeoutMs === undefined ? { signal } : { signal, timeoutMs })
 	}
 
 	/**
@@ -517,6 +521,89 @@ function applyBrowserTools(ctx: Context, controller: BridgeController): void {
 			const params: Record<string, unknown> = { x: args.x ?? 0, y: args.y ?? 0 }
 			if (args.tabId !== undefined) params.tabId = args.tabId
 			return await controller.execute('scroll', params, exec.signal) as Record<string, JsonValue>
+		},
+	}))
+
+	/** Page-side ceiling of `cmdWait`; the bridge budget adds slack on top. */
+	const WAIT_MAX_MS = 120_000
+
+	ctx.tools.register(defineTool({
+		name: 'browser_wait',
+		description: 'Block until a selector appears, some text shows up in the body, or a page-side predicate turns true. Use it after navigation for SPA routes and lazy-rendered content, which browser_navigate does not wait for.',
+		parameters: {
+			selector: { type: 'string', description: 'CSS selector that must exist in the document.' },
+			text: { type: 'string', description: 'Literal substring that must appear in document.body.innerText.' },
+			fn: { type: 'string', description: 'JS predicate evaluated in the page: an expression ("window.x === 3") or a function body ("() => !!document.querySelector(\'.row\')").' },
+			timeoutMs: { type: 'number', description: `Give up after this many milliseconds; defaults to 15000, capped at ${WAIT_MAX_MS}.` },
+			tabId: { type: 'number', description: 'Target tab; defaults to the active tab.' },
+		},
+		output: {
+			schema: { type: 'object', additionalProperties: true },
+			render: (_args, value) => [{ type: 'text', text: JSON.stringify(value).slice(0, 200) }],
+		},
+		presentCall: args => ({ card: 'generic', title: `Wait for ${args.selector ?? args.text ?? 'page condition'}`, kind: 'other' as const }),
+		async execute(args, exec) {
+			const given = (['selector', 'text', 'fn'] as const).filter(k => args[k] !== undefined && String(args[k]).length > 0)
+			if (given.length === 0) throw new Error('browser_wait needs exactly one of selector, text, fn — otherwise there is nothing to wait for')
+			if (given.length > 1) throw new Error(`browser_wait takes one condition, got ${given.join(' + ')} — pick the one you actually mean`)
+			const timeoutMs = Math.min(WAIT_MAX_MS, Math.max(100, Number(args.timeoutMs ?? 15_000)))
+			const params: Record<string, unknown> = { [given[0]]: args[given[0]], timeoutMs }
+			if (args.tabId !== undefined) params.tabId = args.tabId
+			// Slack so the page-side timeout always reports before the bridge gives up.
+			return await controller.execute('wait', params, exec.signal, timeoutMs + 10_000) as Record<string, JsonValue>
+		},
+	}))
+
+	ctx.tools.register(defineTool({
+		name: 'browser_find',
+		description: 'Describe the elements matching a CSS selector — count, tag, id, class, text, href and viewport rect. Read-only; use it to decide what to click and to verify the page state.',
+		parameters: {
+			selector: { type: 'string', required: true, description: 'CSS selector to query.' },
+			limit: { type: 'number', description: 'Maximum items to describe; defaults to 10, capped at 50 (count is always the full total).' },
+			tabId: { type: 'number', description: 'Target tab; defaults to the active tab.' },
+		},
+		output: {
+			schema: { type: 'object', additionalProperties: true },
+			render: (_args, value) => [{ type: 'text', text: JSON.stringify(value).slice(0, 1200) }],
+		},
+		presentCall: args => ({ card: 'generic', title: `Find ${args.selector}`, kind: 'other' as const }),
+		async execute(args, exec) {
+			const params: Record<string, unknown> = { selector: args.selector }
+			if (args.limit !== undefined) params.limit = args.limit
+			if (args.tabId !== undefined) params.tabId = args.tabId
+			return await controller.execute('find', params, exec.signal) as Record<string, JsonValue>
+		},
+	}))
+
+	ctx.tools.register(defineTool({
+		name: 'browser_dialog',
+		description: 'Read or change how native alert/confirm/prompt dialogs are answered (accept, dismiss, or manual), and get the recent dialog log so you can prove one appeared.',
+		parameters: {
+			policy: { type: 'string', enum: ['accept', 'dismiss', 'manual'], description: 'Set this policy; omit to only read the current one.' },
+		},
+		output: {
+			schema: { type: 'object', additionalProperties: true },
+			render: (_args, value) => [{ type: 'text', text: JSON.stringify(value).slice(0, 600) }],
+		},
+		presentCall: args => ({ card: 'generic', title: args.policy ? `Dialog policy → ${args.policy}` : 'Read dialog policy', kind: 'other' as const }),
+		async execute(args, exec) {
+			const params: Record<string, unknown> = {}
+			if (args.policy !== undefined) params.policy = args.policy
+			return await controller.execute('dialog', params, exec.signal) as Record<string, JsonValue>
+		},
+	}))
+
+	ctx.tools.register(defineTool({
+		name: 'browser_info',
+		description: 'Report which browser and which extension build is actually attached. Run it first when behaviour looks wrong — a stale extension or the wrong browser profile explains most of it.',
+		parameters: {},
+		output: {
+			schema: { type: 'object', additionalProperties: true },
+			render: (_args, value) => [{ type: 'text', text: JSON.stringify(value).slice(0, 400) }],
+		},
+		presentCall: () => ({ card: 'generic', title: 'Browser identity', kind: 'other' as const }),
+		async execute(_args, exec) {
+			return await controller.execute('browser.info', {}, exec.signal) as Record<string, JsonValue>
 		},
 	}))
 

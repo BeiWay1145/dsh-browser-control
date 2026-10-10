@@ -200,14 +200,21 @@ curl -X POST http://127.0.0.1:9777/api/command \
 | `browser_type` | Type into inputs |
 | `browser_press` | Send keyboard keys |
 | `browser_scroll` | Scroll the page |
+| `browser_wait` | Wait for an element / text / page condition (up to 120s, v1.0.9+) |
+| `browser_find` | Query elements by CSS selector, returning count and viewport rects (read-only, v1.0.9+) |
+| `browser_dialog` | Read or set the native-dialog policy accept/dismiss/manual, plus the recent dialog log (v1.0.9+) |
 | `browser_tabs` | Tab management (list/open/close/activate) |
 | `browser_evaluate` | Run arbitrary JS |
 | `browser_screenshot` | Capture page screenshot |
 | `browser_console_log` | Captured page console entries (v1.0.7+) |
 | `browser_network_log` | Captured HTTP request/response log (v1.0.7+) |
+| `browser_network_clear` | Clear the network log buffer on its own (v1.0.7+) |
 | `browser_pdf` | Export the current page as PDF (v1.0.7+) |
 | `browser_emulate` | Switch to a device viewport (mobile / desktop / custom, v1.0.7+) |
 | `browser_cleanup` | Clean up temp files |
+| `browser_info` | Which browser and extension build is attached (run it first when debugging, v1.0.9+) |
+
+20 tools in total. `browser_wait`, `browser_find`, `browser_dialog` and `browser_info` existed inside the extension up to v1.0.8 but were never registered as tools, so the agent could not reach them; `browser_network_clear` existed in code and was simply missing from this table. `verify/verify_surface.mjs` now reconciles the extension command table, the commands the plugin calls, this table and the built bundle, so any drift fails `npm run verify`.
 
 ## Architecture
 
