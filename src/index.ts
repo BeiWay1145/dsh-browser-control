@@ -4,11 +4,13 @@
  * it. The Settings-managed `enabled` flag starts and stops the listener live
  * through dsh-settings' change hook — no reload needed.
  *
- * We deliberately bypass the higher-level `installSettingsSection` helper and
- * talk to the lower-level `sctx.settings.register` API directly: that API
- * predates the helper and is the one stable across every dsh-settings build a
- * consumer is realistically pinned to. Importing the helper on a build that
- * does not export it crashes the whole plugin at module load.
+ * Settings integration is feature-detected, never assumed. The plugin bypasses the
+ * higher-level `installSettingsSection` helper (importing it on a build that does not
+ * export it crashes the plugin at module load) and calls the lower-level
+ * `sctx.settings.register` only when the host actually has it — dsh-settings up to
+ * 0.1.2-rc.1. 0.1.7-rc.2 and 0.2.x export `SettingsForms` with no `register`, so there
+ * the bridge converges from the profile config alone and the host projects this
+ * plugin's own `Config` schema into the settings page.
  *
  * Tools stay mounted whenever the plugin does; calling one while the bridge
  * is disabled or the extension is offline fails with a message naming the
@@ -22,9 +24,20 @@ import { FiberState, type Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-tools'
-import type { SettingsScope } from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-invariants'
+import type {} from '@deepseek-ai/dsh-settings'
 import { BridgeServer, cleanupArtifacts } from './server.ts'
+
+/**
+ * Namespace handle as returned by `sctx.settings.register` on dsh-settings up to
+ * 0.1.2-rc.1. Declared structurally instead of imported: 0.1.7+ dropped both
+ * `register` and the `SettingsScope` type, and the plugin must still typecheck
+ * against those builds.
+ */
+interface LegacySettingsScope<T> {
+	get(): T
+	watch(callback: (next: T, prev: T) => void | Promise<void>): () => void
+}
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'browser-bridge'
@@ -845,27 +858,59 @@ export function apply(ctx: Context, config: Config): void {
 	const controller = new BridgeController(line => ctx.logger.info(line))
 
 	let current: () => ResolvedConfig = () => resolved
-	// Equivalent of @deepseek-ai/dsh-settings' `installSettingsSection`, inlined so
-	// the plugin still loads on dsh-settings builds that predate the helper. The
-	// underlying `sctx.settings.register` API is the one stable across every
-	// dsh-settings version a consumer is realistically pinned to.
+	// Settings wiring, feature-detected. `sctx.settings.register` exists on
+	// dsh-settings up to 0.1.2-rc.1; 0.1.7-rc.2 and 0.2.x export `SettingsForms`
+	// instead, whose surface is configure/describe/update/replace/mutate — calling
+	// `register` there throws a TypeError in the middle of this callback and used to
+	// skip the reconcile/watch below (issue #8).
 	ctx.inject(['settings'], (sctx) => {
-		const scope = (sctx.settings.register as (
-			ns: string,
-			schema: typeof Config,
-			options: { base: Config; validate?: (value: Config) => void },
-		) => SettingsScope<Config>)(
-			BROWSER_BRIDGE_SETTINGS_NAMESPACE,
-			Config,
-			{
+		const settings = sctx.settings as unknown as {
+			register?: (
+				ns: string,
+				schema: typeof Config,
+				options: { base: Config; validate?: (value: Config) => void },
+			) => LegacySettingsScope<Config>
+			configure?: (presentation: { auto?: boolean }) => () => void
+		}
+		/** Converge without a namespace: the profile config stays authoritative. */
+		const withoutNamespace = (why: string): void => {
+			current = () => resolved
+			ctx.logger.info(`browser-bridge: settings integration skipped (${why})`)
+			// A failed start is recorded on the controller so every tool call reports it,
+			// instead of throwing out of a callback the host never awaits.
+			void controller.reconcile(current())
+		}
+		const register = settings.register
+		if (typeof register !== 'function') {
+			// dsh-settings 0.1.7+ / 0.2.x: the host projects this plugin's own `Config`
+			// schema into an auto settings page, and editing that page re-applies the
+			// entry, so the `config` handed to apply() is already the live value.
+			const configure = settings.configure
+			if (typeof configure === 'function') {
+				try {
+					ctx.effect(() => configure({ auto: true }), 'browser-bridge: settings presentation')
+				} catch (error) {
+					ctx.logger.info(`browser-bridge: settings presentation skipped: ${errorMessage(error)}`)
+				}
+			}
+			withoutNamespace('no settings.register on this dsh-settings build')
+			return
+		}
+		let scope: LegacySettingsScope<Config>
+		try {
+			scope = register(BROWSER_BRIDGE_SETTINGS_NAMESPACE, Config, {
 				base: config,
 				validate: (value) => {
 					if (value.enabled && (value.token ?? '').trim().length === 0) {
 						throw new Error('browser-bridge: token must be a non-empty string when enabled')
 					}
 				},
-			},
-		)
+			})
+		} catch (error) {
+			ctx.logger.info(`browser-bridge: settings namespace failed: ${errorMessage(error)}`)
+			withoutNamespace('register threw')
+			return
+		}
 		current = () => scope.get() as ResolvedConfig
 		ctx.effect(() => () => {
 			// Mirror `isUnloading` from dsh-settings (private): the fiber's own

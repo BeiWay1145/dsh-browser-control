@@ -4,11 +4,13 @@
  * it. The Settings-managed `enabled` flag starts and stops the listener live
  * through dsh-settings' change hook — no reload needed.
  *
- * We deliberately bypass the higher-level `installSettingsSection` helper and
- * talk to the lower-level `sctx.settings.register` API directly: that API
- * predates the helper and is the one stable across every dsh-settings build a
- * consumer is realistically pinned to. Importing the helper on a build that
- * does not export it crashes the whole plugin at module load.
+ * Settings integration is feature-detected, never assumed. The plugin bypasses the
+ * higher-level `installSettingsSection` helper (importing it on a build that does not
+ * export it crashes the plugin at module load) and calls the lower-level
+ * `sctx.settings.register` only when the host actually has it — dsh-settings up to
+ * 0.1.2-rc.1. 0.1.7-rc.2 and 0.2.x export `SettingsForms` with no `register`, so there
+ * the bridge converges from the profile config alone and the host projects this
+ * plugin's own `Config` schema into the settings page.
  *
  * Tools stay mounted whenever the plugin does; calling one while the bridge
  * is disabled or the extension is offline fails with a message naming the
