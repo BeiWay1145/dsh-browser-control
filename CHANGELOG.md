@@ -1,6 +1,6 @@
 # 更新日志
 
-## Unreleased
+## v1.0.9 (2026-10-10)
 
 - 新增 4 个工具，`browser_*` 从 16 个到 **20 个**：`browser_wait`（等元素/等文本/等页面条件，最长 120 秒）、`browser_find`（按选择器查元素，返回数量与视口矩形）、`browser_dialog`（读改原生弹窗应答策略并回最近弹窗记录）、`browser_info`（报告实际连上的浏览器与扩展版本）。四个都是**扩展里早就实现好、但一直没注册成工具**的能力，agent 之前调不到；`browser_wait` 尤其离谱——README 和 `docs/BEHAVIOR.md` 一直在宣传它，代码里根本没有。
 - 新增 `controller.execute(..., timeoutMs)`：桥接侧的超时预算可以按命令单独给。`browser_wait` 用它把预算设成「页面等待上限 + 10 秒」，保证先由页面侧报「等不到」，而不是被桥接掐断——后者会让 agent 分不清"页面慢"和"链路死"。
