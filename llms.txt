@@ -5,10 +5,12 @@ Chrome 浏览器扩展 + DeepSeek Harness 插件，让 AI Agent 通过 CDP 驱�
 ## 文件结构
 
 - `extension/` - Chrome MV3 扩展（background.js Service Worker + popup UI）
-- `plugin/` - DeepSeek Harness 插件（WebSocket 桥 + browser_* 工具）
-- `install.sh` - 一键安装脚本
-- `cordis.patch.yml` - 插件挂载配置
-- `dsh-config/` - dsh 接入说明
+- `src/` - dsh 插件源码（WebSocket 桥 + HTTP 面 + `browser_*` 工具）
+- `lib/` - 构建产物，按约定提交（npm 包只含宿主侧这一份，没有浏览器端模块）
+- `verify/` - 纯 node 实测台，`npm run verify` 跑完（见 `verify/README.md`）
+- `install.sh` - 旧「复制进 harness 源码树」方式的安装脚本（v1.0.2 及以前）
+- `cordis.patch.yml` - 插件挂载配置（`enabled: true`，与 schema 默认保持一致）
+- `dsh-config/` - dsh 配置项参考
 
 ## 技术栈
 
@@ -19,10 +21,18 @@ Chrome 浏览器扩展 + DeepSeek Harness 插件，让 AI Agent 通过 CDP 驱�
 - TypeScript（strict 模式）
 - Cordis 插件系统（DeepSeek Harness 生态）
 
+## 信任边界
+
+- 只绑 `127.0.0.1`；**Token 才是真正的边界，回环绑定不是**
+- `/api/command`、`/api/cleanup` 要求 Token（`Authorization: Bearer` / `X-Token` / `?token=`），与 WS 同一个凭据，常数时间比较
+- WS 升级校验 `Host` 必须是回环（挡 DNS 重绑定）并拒绝网页 `Origin`，只放行 `*-extension://` 与无 Origin 的本机客户端
+- 所有 HTTP 响应都不带 `Access-Control-Allow-Origin`
+- `/` 与 `/api/status` 免鉴权，只报链路状态
+
 ## 关键文件
 
-- `plugin/src/index.ts` - 11 个 browser_* 工具注册
-- `plugin/src/server.ts` - WebSocket 服务 + HTTP 面 + 状态页
-- `plugin/src/ws.ts` - RFC 6455 帧编解码
+- `src/index.ts` - 16 个 `browser_*` 工具注册 + settings 接线的版本兼容分支
+- `src/server.ts` - WebSocket 服务 + HTTP 面（鉴权、来源校验、状态页）
+- `src/ws.ts` - RFC 6455 帧编解码
 - `extension/background.js` - CDP 命令分发 + 持久 debugger 附着
 - `extension/popup.js` - 弹窗状态 UI

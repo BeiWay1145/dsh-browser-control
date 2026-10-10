@@ -11,7 +11,7 @@ const STATE_TEXT = {
 const STATE_SUB = {
 	open: () => '桥接服务运行中，随时听候调用',
 	connecting: () => '正在与 dsh 桥接服务握手',
-	idle: () => '在 dsh 设置 → 插件 里开启浏览器控制',
+	idle: () => '没连上桥接服务：确认 dsh 在跑、插件已装（装上即默认开启）',
 };
 
 function render(status) {
