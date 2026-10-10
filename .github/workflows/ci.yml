@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: 类型检查
+        run: pnpm run typecheck
+
+      - name: 重新构建 lib/
+        run: pnpm exec tsc -p tsconfig.json && pnpm exec tsdown
+
+      # 这条专门堵 v1.0.7 那类事故：src/ 加了工具却没重新打包，
+      # 结果发布出去的 lib/index.js 只注册了 11 个工具（源码里有 16 个）。
+      # 提交里带上构建产物，所以产物与源码不一致就是 bug，直接在 CI 失败。
+      - name: 构建产物必须与源码同步
+        run: |
+          git add -A lib
+          if ! git diff --cached --quiet; then
+            echo "::error::lib/ 与 src/ 不一致——提交前请运行 npm run build 并把 lib/ 一起提交"
+            git diff --cached --stat
+            exit 1
+          fi
+
+      - name: 包结构检查
+        run: pnpm exec publint
+
+      # 四方对账（扩展命令表 ↔ 插件调用 ↔ README 工具表 ↔ 构建产物）、
+      # 三种宿主形状的 apply()、HTTP 鉴权与升级来源、错误契约、协议握手、发布产物行为。
+      - name: 实测台
+        run: pnpm run verify
+
+      - name: 文档里的 release 下载链接不得为死链
+        run: |
+          curl -sfL "https://api.github.com/repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            -H "Accept: application/vnd.github+json" > /tmp/releases.json
+          node verify/verify_release_links.mjs /tmp/releases.json

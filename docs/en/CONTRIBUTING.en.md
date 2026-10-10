@@ -35,7 +35,7 @@ Build it with Python `zipfile` or `tar`, and make sure the artifact **starts wit
 3. Tag, create the Release, keep the asset naming: `DSH-Browser-Control-vX.Y.Z.zip` (extension), `dsh-browser-control-plugin-vX.Y.Z.zip` (plugin)
 4. **The offline plugin zip must contain `cordis.patch.yml`** — `package.json`'s `dsh.bundle.patch` points at it, and the v1.0.7 asset omitted it, so installing from that zip mounted nothing. The extension zip must carry every file under `extension/`, `icons/` included
 5. Update the download links in README.md and README.en.md, then run the link audit above
-6. Ship a `.sha256` sidecar per zip; after uploading, download each asset back anonymously and re-check the first 4 bytes, `unzip -t` and the entry separators
+6. **Put checksums in the release body, not in `.sha256` sidecar assets**: list file name / byte size / SHA-256 (MD5 too when useful) in the body, then download each asset back anonymously and re-check the first 4 bytes, `unzip -t` and the entry separators
 7. `npm publish` (`files` excludes `verify/` and `extension/`; confirm `lib/` is current first). On the maintainer machine `~/.npmrc` defaults to the npmmirror read-only mirror, which cannot publish — `publishConfig.registry` now pins the official registry, do not rely on the CLI default
 
 ## Commit conventions

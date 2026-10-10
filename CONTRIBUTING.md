@@ -26,7 +26,7 @@ node verify/verify_release_links.mjs /tmp/releases.json
 
 ## 打包扩展 zip
 
-必须用 Python `zipfile` 或 `tar` 这类标准写法，产出要满足：**文件头就是 `PK\x03\x04`**（不能带 multipart 前言）、**条目分隔符为正斜杠**。Windows 资源管理器只认文件头，前面多出 162 字节的 `------formdata-undici-…` 就拒绝展开，而 7-Zip / `tar` / Python 会往里搜 `PK`，于是「一人解压失败、另一人包完好」会同时为真（issue #2）。上传后**匿名再下载一次**，核对头 4 字节、`unzip -t` 与条目分隔符，并附一个 `.sha256` 旁文件。
+必须用 Python `zipfile` 或 `tar` 这类标准写法，产出要满足：**文件头就是 `PK\x03\x04`**（不能带 multipart 前言）、**条目分隔符为正斜杠**。Windows 资源管理器只认文件头，前面多出 162 字节的 `------formdata-undici-…` 就拒绝展开，而 7-Zip / `tar` / Python 会往里搜 `PK`，于是「一人解压失败、另一人包完好」会同时为真（issue #2）。上传后**匿名再下载一次**，核对头 4 字节、`unzip -t` 与条目分隔符；校验和按下面「发布」第 6 条写在 Release 正文里。
 
 ## 发布
 
@@ -35,7 +35,7 @@ node verify/verify_release_links.mjs /tmp/releases.json
 3. 打 tag、建 Release，资产沿用现有命名：`DSH-Browser-Control-vX.Y.Z.zip`（扩展）、`dsh-browser-control-plugin-vX.Y.Z.zip`（插件）
 4. **插件离线包里必须有 `cordis.patch.yml`**——`package.json` 的 `dsh.bundle.patch` 指向它，v1.0.7 那份资产漏了这个文件，离线安装就等于没挂载；扩展包必须含 `extension/` 下全部文件（含 `icons/`）
 5. README / README.en 的下载链接改成新名字，然后跑上面那条链接实测
-6. 每个 zip 附一份 `.sha256` 旁文件，上传后匿名下载回来核对头 4 字节、`unzip -t` 与条目分隔符
+6. **校验和写在 Release 正文里，不要上传 `.sha256` 附件**：正文列 文件名 / 字节数 / SHA-256（必要时加 MD5），上传后匿名下载回来核对头 4 字节、`unzip -t` 与条目分隔符
 7. `npm publish`（`files` 白名单不含 `verify/` 和 `extension/`，发包前确认 `lib/` 已是最新）。这台机器 `~/.npmrc` 的默认源是 npmmirror 镜像，**不能发布**；包里的 `publishConfig.registry` 已写死官方源，别再依赖命令行默认值
 
 ## 写宿主适配时会踩的坑
