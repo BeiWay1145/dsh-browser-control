@@ -15,6 +15,13 @@
 'use strict';
 
 const EXT_VERSION = chrome.runtime.getManifest().version;
+/**
+ * Wire protocol revision, independent of the app version: bumped only when the
+ * frame contract changes (a command renamed, a payload reshaped). The bridge
+ * compares it on `hello` so a version mismatch shows up as a line in the status
+ * page instead of as "some commands mysteriously fail".
+ */
+const PROTOCOL_VERSION = 1;
 const HEARTBEAT_MS = 20_000;
 const MAX_BACKOFF_MS = 30_000;
 const DEFAULT_PORT = 9777;
@@ -197,7 +204,7 @@ function sendHello() {
 	const name = /Edg\//.test(ua) ? 'edge' : /Chrome\//.test(ua) ? 'chrome' : 'chromium';
 	const versionMatch = ua.match(/(?:Edg|Chrome)\/([\d.]+)/);
 	helloInfo = { name, version: versionMatch ? versionMatch[1] : 'unknown', ua };
-	send({ type: 'hello', client: 'dsh-browser-extension', version: EXT_VERSION, browser: helloInfo });
+	send({ type: 'hello', client: 'dsh-browser-extension', version: EXT_VERSION, protocol: PROTOCOL_VERSION, browser: helloInfo });
 }
 
 /* Alarm keeps the SW alive for reconnect even without user events. */

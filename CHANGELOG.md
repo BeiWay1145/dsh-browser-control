@@ -6,6 +6,7 @@
 - 新增 `controller.execute(..., timeoutMs)`：桥接侧的超时预算可以按命令单独给。`browser_wait` 用它把预算设成「页面等待上限 + 10 秒」，保证先由页面侧报「等不到」，而不是被桥接掐断——后者会让 agent 分不清"页面慢"和"链路死"。
 - 新增 `verify/verify_surface.mjs`：四方对账（扩展 `COMMANDS` 表 ↔ 插件实际调用的命令 ↔ 两份 README 的工具表 ↔ 构建产物 `lib/index.js`），已串进 `npm run verify`。上面那四类漂移以后会在提交时暴露，而不是等用户提 issue。
 - 修正 `extension/background.js` 里 `dialog` 命令的注释：它写着 `{action:'get'|'set'}`，实现看的其实是 `policy` 字段，按注释传参会静默无效。
+- 新增协议版本握手：`hello` 帧现在带 `protocol`（与包版本号解耦，只在帧契约变化时递增）。桥记录双方版本并在 `/api/status` 与状态页暴露 `bridgeProtocol` / `extensionProtocol` / `protocolCompatible` / `protocolNote`；扩展比桥新 → 判不兼容并提示升级插件，扩展不声明或声明 0（v1.0.9 以前的老扩展）→ 按兼容处理，不为一个装饰性字段打断能正常工作的安装。这类"某些命令莫名失败"的成因（版本错位）以前只能靠猜，现在状态页一行就能看出来。
 - 文档：README（中英）工具表补上 `browser_wait` / `browser_find` / `browser_dialog` / `browser_info`，以及此前漏列的 `browser_network_clear`。
 
 ## v1.0.8 (2026-10-10)

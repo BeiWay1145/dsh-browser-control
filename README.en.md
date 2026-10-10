@@ -231,6 +231,7 @@ Chrome browser
 - Off by default; enabled manually from Settings
 - Persistent debugger attachment — banner stays visible during control
 - Listens on 127.0.0.1 only; the command surface (WebSocket and HTTP) shares one token, and no cross-origin access is granted
+- The wire protocol has its own version, bumped only when the frame contract changes; a mismatch is named on the status page
 
 ## Verified
 

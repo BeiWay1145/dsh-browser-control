@@ -20,6 +20,13 @@
  * `wait`, `dialog`, `console.log`, `network.log`, `network.clear`, `pdf`, `emulate`.
  * @module @deepseek-ai/dsh-browser-bridge/server
  */
+/**
+ * Wire protocol revision this bridge speaks. Kept separate from the package
+ * version: an extension that is one patch newer still works, an extension that
+ * speaks a different frame contract does not, and only the second case should
+ * light up.
+ */
+export declare const BRIDGE_PROTOCOL_VERSION = 1;
 /** Per-command ceiling when the caller passes none. */
 export declare const DEFAULT_COMMAND_TIMEOUT_MS = 60000;
 /** Hard ceiling accepted from callers; longer waits cannot be expressed. */
@@ -28,6 +35,8 @@ export declare const MAX_COMMAND_TIMEOUT_MS = 300000;
 export interface BridgeHello {
     readonly client: string;
     readonly version: string;
+    /** Frame-contract revision the extension declared; 0 when it predates versioning. */
+    readonly protocol: number;
     readonly browser: {
         readonly name: string;
         readonly version: string;
@@ -41,6 +50,13 @@ export interface BridgeServerStatus {
     readonly extensionConnected: boolean;
     readonly connectedAt: string | undefined;
     readonly hello: BridgeHello | undefined;
+    /** Protocol revision this bridge speaks. */
+    readonly bridgeProtocol: number;
+    /** Protocol revision the extension declared; absent/0 when it predates versioning. */
+    readonly extensionProtocol: number;
+    /** False when the two sides cannot agree on the frame contract, with the reason. */
+    readonly protocolCompatible: boolean;
+    readonly protocolNote: string | null;
     readonly pendingCommands: number;
     readonly lastError: string | undefined;
     /** True when the active token is the published default or too short to be a secret. */
@@ -116,6 +132,13 @@ export declare class BridgeServer {
      */
     cleanup(): Promise<CleanupResult>;
     private log;
+    /**
+     * Mismatch description, or null when the two sides can talk. An older
+     * extension that declares nothing is treated as v1-compatible: it still
+     * answers every command this bridge has ever sent, so failing the link would
+     * break working installs for a cosmetic gap.
+     */
+    private get protocolNote();
     /**
      * Whether a request carries the bridge token, the same credential the WebSocket
      * upgrade checks. Accepted forms: `Authorization: Bearer <token>`, `X-Token: <token>`

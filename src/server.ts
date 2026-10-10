@@ -30,6 +30,13 @@ import { encodeCloseFrame, encodeControlFrame, encodeTextFrame, FrameReader } fr
 import { BridgeError, classify } from './errors.ts'
 
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+/**
+ * Wire protocol revision this bridge speaks. Kept separate from the package
+ * version: an extension that is one patch newer still works, an extension that
+ * speaks a different frame contract does not, and only the second case should
+ * light up.
+ */
+export const BRIDGE_PROTOCOL_VERSION = 1
 /** Per-command ceiling when the caller passes none. */
 export const DEFAULT_COMMAND_TIMEOUT_MS = 60_000
 /** Hard ceiling accepted from callers; longer waits cannot be expressed. */
@@ -44,6 +51,8 @@ const MIN_RECOMMENDED_TOKEN_LENGTH = 16
 export interface BridgeHello {
   readonly client: string
   readonly version: string
+  /** Frame-contract revision the extension declared; 0 when it predates versioning. */
+  readonly protocol: number
   readonly browser: { readonly name: string; readonly version: string; readonly ua: string }
 }
 
@@ -54,6 +63,13 @@ export interface BridgeServerStatus {
   readonly extensionConnected: boolean
   readonly connectedAt: string | undefined
   readonly hello: BridgeHello | undefined
+  /** Protocol revision this bridge speaks. */
+  readonly bridgeProtocol: number
+  /** Protocol revision the extension declared; absent/0 when it predates versioning. */
+  readonly extensionProtocol: number
+  /** False when the two sides cannot agree on the frame contract, with the reason. */
+  readonly protocolCompatible: boolean
+  readonly protocolNote: string | null
   readonly pendingCommands: number
   readonly lastError: string | undefined
   /** True when the active token is the published default or too short to be a secret. */
@@ -154,6 +170,10 @@ export class BridgeServer {
       extensionConnected: this.clientSocket !== undefined,
       connectedAt: this.connectedAt?.toISOString(),
       hello: this.hello,
+      bridgeProtocol: BRIDGE_PROTOCOL_VERSION,
+      extensionProtocol: this.hello?.protocol ?? 0,
+      protocolCompatible: this.protocolNote === null,
+      protocolNote: this.protocolNote,
       pendingCommands: this.pending.size,
       lastError: this.lastError,
       insecureToken: this.insecureToken,
@@ -284,6 +304,25 @@ export class BridgeServer {
 
   private log(line: string): void {
     this.options.log?.(line)
+  }
+
+  /**
+   * Mismatch description, or null when the two sides can talk. An older
+   * extension that declares nothing is treated as v1-compatible: it still
+   * answers every command this bridge has ever sent, so failing the link would
+   * break working installs for a cosmetic gap.
+   */
+  private get protocolNote(): string | null {
+    if (this.hello === undefined) return null
+    const theirs = this.hello.protocol
+    if (theirs === 0) return null
+    if (theirs > BRIDGE_PROTOCOL_VERSION) {
+      return `扩展声明协议 v${theirs}，本桥只支持到 v${BRIDGE_PROTOCOL_VERSION} —— 请升级 dsh 插件，否则新命令会报「未知命令」`
+    }
+    if (theirs < BRIDGE_PROTOCOL_VERSION) {
+      return `扩展协议 v${theirs} 低于本桥 v${BRIDGE_PROTOCOL_VERSION} —— 旧扩展可能缺少新命令，必要时重新下载扩展包`
+    }
+    return null
   }
 
   /* ------------------------------------------------------------- HTTP face */
@@ -514,7 +553,7 @@ export class BridgeServer {
     const full = this.continuationRemainder
     this.continuationRemainder = ''
     this.continuationOpen = false
-    let msg: { type?: unknown; id?: unknown; ok?: unknown; result?: unknown; error?: unknown; t?: unknown; client?: unknown; version?: unknown; browser?: unknown }
+    let msg: { type?: unknown; id?: unknown; ok?: unknown; result?: unknown; error?: unknown; t?: unknown; client?: unknown; version?: unknown; protocol?: unknown; browser?: unknown }
     try {
       msg = JSON.parse(full) as typeof msg
     } catch {
@@ -522,12 +561,16 @@ export class BridgeServer {
       return
     }
     if (msg.type === 'hello') {
+      const declared = typeof msg.protocol === 'number' ? msg.protocol : 0
       this.hello = {
         client: typeof msg.client === 'string' ? msg.client : 'unknown',
         version: typeof msg.version === 'string' ? msg.version : 'unknown',
+        protocol: declared,
         browser: (msg.browser ?? { name: 'unknown', version: 'unknown', ua: '' }) as BridgeHello['browser'],
       }
-      this.log(`hello: client=${this.hello.client} v${this.hello.version} browser=${this.hello.browser.name} ${this.hello.browser.version}`)
+      this.log(`hello: client=${this.hello.client} v${this.hello.version} protocol=v${declared || '?'} browser=${this.hello.browser.name} ${this.hello.browser.version}`)
+      const note = this.protocolNote
+      if (note !== null) this.log(`protocol mismatch: ${note}`)
       return
     }
     if (msg.type === 'pong') return
@@ -679,7 +722,9 @@ async function refresh(){
       ['连接时间',j.connectedAt?new Date(j.connectedAt).toLocaleString():'—'],
       ['截图目录',j.shotsDir||'—'],
       ['令牌强度',j.insecureToken?'<span class="badge off">默认/过短，建议改了</span>':'<span class="badge on">已自定义</span>'],
+      ['协议版本','桥 v'+j.bridgeProtocol+' / 扩展 v'+(j.extensionProtocol||'?')+(j.protocolCompatible?'':' <span class="badge off">不匹配</span>')],
     ];
+    if(j.protocolNote) rows.push(['协议提示','<span style="color:var(--red)">'+j.protocolNote+'</span>']);
     document.getElementById('rows').innerHTML=rows.map(([k,v])=>'<div class="row"><span class="k">'+k+'</span><span class="v">'+v+'</span></div>').join('');
     document.getElementById('raw').textContent=JSON.stringify(j,null,2);
   }catch(e){document.getElementById('sub').textContent='连接失败: '+e.message}
