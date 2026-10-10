@@ -4,7 +4,12 @@
  * native-messaging host or registry setup exists; dsh drives commands through
  * {@link BridgeServer.execute} and reads link state through {@link BridgeServer.status}.
  * A small HTTP face (`/api/status`, `/api/command`, `/api/cleanup`, `/`) keeps
- * the bridge usable from curl while the server runs.
+ * the bridge usable from curl while the server runs. `/api/command` and
+ * `/api/cleanup` demand the same token as the WebSocket upgrade; `/` and
+ * `/api/status` stay readable because the status page needs them and they only
+ * report link state. No response carries `Access-Control-Allow-Origin`, and the
+ * upgrade checks `Host` plus `Origin` so neither a web page nor a rebound
+ * hostname can attach.
  *
  * Wire protocol (text frames, one JSON object each):
  * - extension → server: `{type:'hello',…}`, `{type:'pong',t}`, `{type:'result',id,ok,result?|error}`
@@ -18,7 +23,7 @@
 
 import http from 'node:http'
 import type net from 'node:net'
-import { randomUUID, createHash } from 'node:crypto'
+import { randomUUID, createHash, timingSafeEqual } from 'node:crypto'
 import { mkdir, readdir, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { encodeCloseFrame, encodeControlFrame, encodeTextFrame, FrameReader } from './ws.ts'
@@ -29,6 +34,10 @@ export const DEFAULT_COMMAND_TIMEOUT_MS = 60_000
 /** Hard ceiling accepted from callers; longer waits cannot be expressed. */
 export const MAX_COMMAND_TIMEOUT_MS = 300_000
 const MAX_HTTP_BODY_BYTES = 2 * 1024 * 1024
+/** The published default. It ships in README and `cordis.patch.yml`, so it is public knowledge. */
+const DEFAULT_TOKEN = 'dsh-local'
+/** Tokens shorter than this cannot be brute-forced meaningfully; the bridge warns at start. */
+const MIN_RECOMMENDED_TOKEN_LENGTH = 16
 
 /** Identity the extension announces right after the handshake completes. */
 export interface BridgeHello {
@@ -46,6 +55,8 @@ export interface BridgeServerStatus {
   readonly hello: BridgeHello | undefined
   readonly pendingCommands: number
   readonly lastError: string | undefined
+  /** True when the active token is the published default or too short to be a secret. */
+  readonly insecureToken: boolean
 }
 
 /** Caller controls for one {@link BridgeServer.execute} round-trip. */
@@ -144,7 +155,12 @@ export class BridgeServer {
       hello: this.hello,
       pendingCommands: this.pending.size,
       lastError: this.lastError,
+      insecureToken: this.insecureToken,
     }
+  }
+
+  private get insecureToken(): boolean {
+    return this.options.token === DEFAULT_TOKEN || this.options.token.trim().length < MIN_RECOMMENDED_TOKEN_LENGTH
   }
 
   /** Bind `127.0.0.1:<port>` and start accepting the extension plus HTTP calls. */
@@ -183,6 +199,11 @@ export class BridgeServer {
     })
     this.httpServer = server
     this.log(`listening on ws://127.0.0.1:${this.options.port}/ws`)
+    if (this.insecureToken) {
+      // Loud, but not a hard refusal: the published default keeps a fresh install working,
+      // and refusing here would break every existing extension pairing.
+      this.log(`insecure token (${this.options.token === DEFAULT_TOKEN ? 'the published default' : 'shorter than ' + MIN_RECOMMENDED_TOKEN_LENGTH + ' chars'}) — any local process can present it; set a longer \`token\` in the browser-bridge config`)
+    }
   }
 
   /** Close the extension link, fail every pending command, and release the port. Idempotent. */
@@ -261,6 +282,30 @@ export class BridgeServer {
 
   /* ------------------------------------------------------------- HTTP face */
 
+  /**
+   * Whether a request carries the bridge token, the same credential the WebSocket
+   * upgrade checks. Accepted forms: `Authorization: Bearer <token>`, `X-Token: <token>`
+   * and `?token=<token>` (the query form exists for curl and for the status page).
+   */
+  private authorized(req: http.IncomingMessage, url: URL): boolean {
+    const authorization = req.headers.authorization
+    const header = typeof authorization === 'string' && /^bearer\s+/i.test(authorization)
+      ? authorization.replace(/^bearer\s+/i, '')
+      : typeof req.headers['x-token'] === 'string'
+        ? (req.headers['x-token'] as string)
+        : ''
+    const presented = header.length > 0 ? header : (url.searchParams.get('token') ?? '')
+    return tokenMatches(presented, this.options.token)
+  }
+
+  private rejectUnauthenticated(res: http.ServerResponse, route: string): void {
+    this.log(`http ${route}: rejected (missing or wrong token)`)
+    this.respondJson(res, 401, {
+      ok: false,
+      error: 'unauthorized: pass the bridge token as "Authorization: Bearer <token>", "X-Token: <token>" or ?token=<token>',
+    })
+  }
+
   private handleHttp(req: http.IncomingMessage, res: http.ServerResponse): void {
     const url = new URL(req.url ?? '/', 'http://localhost')
     if (req.method === 'OPTIONS') {
@@ -276,6 +321,11 @@ export class BridgeServer {
       return
     }
     if (url.pathname === '/api/cleanup' && req.method === 'POST') {
+      // Deletes files, so it authenticates like the command endpoint does.
+      if (!this.authorized(req, url)) {
+        this.rejectUnauthenticated(res, 'POST /api/cleanup')
+        return
+      }
       void this.cleanup().then(
         (result) => this.respondJson(res, 200, { ok: true, ...result }),
         (error) => this.respondJson(res, 500, { ok: false, error: errorMessage(error) }),
@@ -283,6 +333,12 @@ export class BridgeServer {
       return
     }
     if (url.pathname === '/api/command' && req.method === 'POST') {
+      // Reaches the extension command table (eval / click / input / screenshot), so it
+      // used to be the whole attack surface; 127.0.0.1 alone never was a boundary.
+      if (!this.authorized(req, url)) {
+        this.rejectUnauthenticated(res, 'POST /api/command')
+        return
+      }
       this.handleCommandRequest(req, res)
       return
     }
@@ -354,9 +410,25 @@ export class BridgeServer {
       socket.destroy()
       return
     }
-    if ((url.searchParams.get('token') ?? '') !== this.options.token) {
+    if (!tokenMatches(url.searchParams.get('token') ?? '', this.options.token)) {
       this.log('websocket rejected: bad token')
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
+      socket.destroy()
+      return
+    }
+    // A WebSocket handshake is not CORS-guarded, so a page could dial 127.0.0.1 freely if
+    // it had a token to present. Origin and Host pin it down: no web-scheme caller, and no
+    // hostname that resolves back to the loopback via rebinding.
+    if (!isLoopbackHost(String(req.headers.host ?? ''))) {
+      this.log(`websocket rejected: host ${req.headers.host}`)
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
+      socket.destroy()
+      return
+    }
+    const origin = typeof req.headers.origin === 'string' ? req.headers.origin : ''
+    if (!isTrustedUpgradeOrigin(origin)) {
+      this.log(`websocket rejected: origin ${origin}`)
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
       socket.destroy()
       return
     }
@@ -493,6 +565,35 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/** Constant-time token comparison; a length mismatch is the only thing leaked. */
+function tokenMatches(presented: string, expected: string): boolean {
+  const a = Buffer.from(presented, 'utf8')
+  const b = Buffer.from(expected, 'utf8')
+  if (a.length !== b.length) return false
+  return timingSafeEqual(a, b)
+}
+
+/**
+ * `Host` must name the loopback address this server binds. Rejecting anything else is
+ * what stops a rebinding setup (a public hostname resolving to 127.0.0.1) from reaching
+ * the bridge through the browser.
+ */
+function isLoopbackHost(host: string): boolean {
+  const withoutPort = host.replace(/:\d+$/, '')
+  return withoutPort === '127.0.0.1' || withoutPort === 'localhost' || withoutPort === '[::1]' || withoutPort === '::1'
+}
+
+/**
+ * An `Origin` of a web scheme means a page opened the socket — WebSocket handshakes are
+ * not covered by CORS, so that has to be refused here. Extension schemes (`chrome-extension:`
+ * etc.) and non-browser clients that send no Origin at all are accepted.
+ */
+function isTrustedUpgradeOrigin(origin: string): boolean {
+  if (origin === '') return true
+  if (/^(?:chrome|moz|ms|safari)-extension:\/\//.test(origin)) return true
+  return /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/.test(origin)
+}
+
 /** Minimal self-refreshing status page with the cleanup action. */
 function statusPageHtml(port: number): string {
   return `<!doctype html>
@@ -522,6 +623,8 @@ function statusPageHtml(port: number): string {
   .btn{padding:7px 14px;border:1px solid var(--border);border-radius:9px;background:var(--card);
        color:var(--text);font-size:12px;cursor:pointer}.btn:hover{background:#334155}
   .btn.danger{border-color:var(--red);color:var(--red)}.btn.danger:hover{background:var(--red-bg)}
+  .tok{flex:1;min-width:150px;padding:7px 10px;border:1px solid var(--border);border-radius:9px;
+       background:var(--bg);color:var(--text);font-size:12px}
   .hint{color:var(--dim);font-size:11px;padding:4px 24px 8px}
   .pre{background:var(--bg);border-top:1px solid var(--border);padding:12px 24px}
   .pre code{color:var(--dim);font-size:11px;white-space:pre-wrap;word-break:break-all}
@@ -536,10 +639,11 @@ function statusPageHtml(port: number): string {
   </div>
   <div class="rows" id="rows"></div>
   <div class="actions">
+    <input class="tok" id="token" type="password" placeholder="桥接 Token（清理按钮需要）" autocomplete="off">
     <button class="btn" onclick="refresh()">刷新</button>
     <button class="btn danger" id="cleanup">🧹 清理截图 + 脚本草稿</button>
   </div>
-  <div class="hint">清理会删除截图目录下的全部文件，以及工作目录顶层的 __ 开头草稿脚本。</div>
+  <div class="hint">Token 只保存在本次浏览器会话（sessionStorage），不写盘；留空则点按钮时询问。/api/command 与 /api/cleanup 现在都要求带 Token。</div>
   <div class="pre"><code id="raw"> </code></div>
   <div class="foot">DSH Browser Bridge · 127.0.0.1:${port}</div>
 </div>
@@ -560,14 +664,24 @@ async function refresh(){
       ['等待命令',String(j.pendingCommands??0)],
       ['连接时间',j.connectedAt?new Date(j.connectedAt).toLocaleString():'—'],
       ['截图目录',j.shotsDir||'—'],
+      ['令牌强度',j.insecureToken?'<span class="badge off">默认/过短，建议改了</span>':'<span class="badge on">已自定义</span>'],
     ];
     document.getElementById('rows').innerHTML=rows.map(([k,v])=>'<div class="row"><span class="k">'+k+'</span><span class="v">'+v+'</span></div>').join('');
     document.getElementById('raw').textContent=JSON.stringify(j,null,2);
   }catch(e){document.getElementById('sub').textContent='连接失败: '+e.message}
 }
+function bridgeToken(){
+  const el=document.getElementById('token');
+  let t=(el.value||'').trim()||sessionStorage.getItem('dshBridgeToken')||'';
+  if(!t){ t=(prompt('桥接 Token（在 profile 的 browser-bridge 配置里，token 字段）')||'').trim(); el.value=t; }
+  if(t) sessionStorage.setItem('dshBridgeToken',t);
+  return t;
+}
 document.getElementById('cleanup').onclick=async()=>{
   if(!confirm('确认清理截图与临时脚本？'))return;
-  const r=await fetch('/api/cleanup',{method:'POST'});const j=await r.json();
+  const r=await fetch('/api/cleanup',{method:'POST',headers:{'Authorization':'Bearer '+bridgeToken()}});
+  const j=await r.json();
+  if(r.status===401){alert('Token 不对，清理没有执行。');return;}
   alert(j.ok?('已删除 '+j.shotsRemoved+' 个截图，'+j.scratchRemoved.length+' 个草稿'):('失败：'+j.error));
   refresh();
 };

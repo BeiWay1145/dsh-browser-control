@@ -165,6 +165,19 @@ Restart dsh → the "DSH Browser Control" card appears in Settings → enable it
 
 Visit `http://127.0.0.1:9777/` for connection status.
 
+### Calling the HTTP face from a script
+
+`/api/command` and `/api/cleanup` now require the token — the same value the extension presents on the WebSocket:
+
+```bash
+curl -X POST http://127.0.0.1:9777/api/command \
+  -H 'Authorization: Bearer <your token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"command":"nav","params":{"url":"https://example.com"}}'
+```
+
+`?token=<your token>` and `X-Token: <your token>` work too. Missing or wrong token is a 401; `/` and `/api/status` stay unauthenticated read-only. What used to work without a token no longer does (issue #3 / #6). The cleanup button on the status page asks for the token once and keeps it in the browser session only.
+
 ## Tools
 
 | Tool | Purpose |
@@ -199,7 +212,7 @@ Chrome browser
 - Extension dials out to the bridge (no native messaging host)
 - Off by default; enabled manually from Settings
 - Persistent debugger attachment — banner stays visible during control
-- Listens on 127.0.0.1 only, token-authenticated
+- Listens on 127.0.0.1 only; the command surface (WebSocket and HTTP) shares one token, and no cross-origin access is granted
 
 ## Verified
 

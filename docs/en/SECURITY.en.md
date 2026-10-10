@@ -16,7 +16,9 @@ The extension requests these Chrome permissions:
 ## Security boundaries
 
 - **Listens on 127.0.0.1 only** — the bridge is never exposed to the network
-- **Token authentication** — the extension must present the correct token to connect
+- **Token authentication** — the extension must present the correct token to connect; `/api/command` and `/api/cleanup` demand the same token (`Authorization: Bearer`, `X-Token` or `?token=`) and answer 401 without it
+- **Upgrade origin checks** — the WebSocket handshake requires a loopback `Host` (blocking DNS rebinding) and refuses any web-page `Origin`; only the extension's own scheme and non-browser clients that send no Origin are accepted
+- **No cross-origin grant** — no HTTP response carries `Access-Control-Allow-Origin`; the status page and its own requests are same-origin
 - **Local-only communication** — extension and bridge talk over WebSocket on localhost
 - **No data upload** — nothing is sent to any external server
 - **User control** — since v1.0.6 the plugin is on by default and binds only to 127.0.0.1; set `enabled: false` in your profile override layer to turn it off
@@ -24,9 +26,9 @@ The extension requests these Chrome permissions:
 
 ## Known limitations
 
-- The extension can execute arbitrary JavaScript in page contexts via CDP — enable it only on machines you trust
-- The `/api/command` endpoint relies on 127.0.0.1 binding for isolation; other processes on the same machine can theoretically call it
-- The default token `dsh-local` prevents accidental connections, it is not a security credential; change it if you need stronger isolation
+- The bridge has no per-process identity check: **any local process that knows the token can drive this browser**. The loopback bind is not the boundary, the token is. `/api/status` and the status page remain unauthenticated read-only information (port, extension hello, browser name and version, screenshots directory).
+- The `eval` command is always available; neither the extension nor the plugin has a switch to disable it. The `allowEval` mentioned in an old changelog entry was never implemented — do not rely on it.
+- The default token `dsh-local` is published in the README and in `cordis.patch.yml`, so it is public knowledge, not a secret. Starting with the default token or one shorter than 16 characters logs a warning and shows "token: default/short" on the status page, but the bridge **still starts** — changing it is on you.
 
 ## Reporting a vulnerability
 

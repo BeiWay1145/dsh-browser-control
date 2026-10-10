@@ -164,6 +164,19 @@ git checkout v1.0.2   # 旧布局在 v1.0.2 tag
 
 访问 `http://127.0.0.1:9777/` 查看连接状态。
 
+### 用脚本直连 HTTP（curl 等）
+
+`/api/command` 与 `/api/cleanup` 现在要求 Token，用的就是扩展连 WS 时那个值：
+
+```bash
+curl -X POST http://127.0.0.1:9777/api/command \
+  -H 'Authorization: Bearer <你的 token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"command":"nav","params":{"url":"https://example.com"}}'
+```
+
+也可以写 `?token=<你的 token>` 或 `X-Token: <你的 token>`。不带、或带错，一律 401；`/` 与 `/api/status` 仍是免鉴权的只读信息。之前「不带 Token 也能调通命令面」的行为已经失效（issue #3 / #6）。状态页上的清理按钮会要求你把 Token 输一次，只记在浏览器会话里。
+
 ## 工具清单
 
 | 工具 | 功能 |
@@ -198,7 +211,7 @@ Chrome 浏览器
 - 扩展主动外连桥（不需要 native messaging host）
 - 默认开启（v1.0.6+），装上即监听，不需要手动启用
 - 持久 debugger 附着——控制期间横幅始终显示
-- 仅监听 127.0.0.1，token 认证
+- 仅监听 127.0.0.1；命令面（WS 与 HTTP）共用同一个 Token，跨源一律不放行
 
 ## 已验证
 

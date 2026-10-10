@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- 修复 #3 / #6 第二步（鉴权，**行为变更**）：`/api/command`、`/api/cleanup` 现在要求 Token，形式与 WS 同一个凭据——`Authorization: Bearer <token>`、`X-Token: <token>` 或 `?token=<token>`，缺失或不对一律 401；比较改成常数时间（`timingSafeEqual`）。WebSocket 升级另加 `Host` 必须是回环地址（挡 DNS 重绑定，403）与 `Origin` 校验：拒绝任何网页来源，放行 `*-extension://` 与不发 Origin 的本机客户端。`/` 与 `/api/status` 保持免鉴权只读（状态页要用）。实测 19 项全过：无 token 的命令面从「200 且真的驱动扩展」变为 401，带 token 的 `nav` 仍然正常执行，`evil.example` Host 与 `https://evil.example` Origin 均 403，扩展来源与常规握手仍 101。
+- 状态页：清理按钮改为索取 Token（只存 sessionStorage，不写盘），并新增「令牌强度」一行；Token 仍是默认的 `dsh-local` 或短于 16 字符时，桥接启动即在日志里告警。**这里刻意没有采纳报告者「拒绝启动」的建议**——那会让所有现存配对当场断连，改成告警 + 页面标红；要硬拒绝可以再说。
+- 文档纠偏：`SECURITY.md` / `docs/en/SECURITY.en.md` 重写「安全边界 / 已知限制」，明确回环绑定不是隔离边界、Token 才是，同机任意知道 Token 的进程仍可驱动浏览器；并撤回 v1.0.6 里那句「`allowEval` 默认 false」——全仓库从未实现过该开关（grep 只在 CHANGELOG 出现），`eval` 一直可用。README 增加脚本直连 HTTP 的 Token 用法与 401 说明。
+
 - 修复 #3 / #6 第一步（CORS）：HTTP 面不再出现任何 `Access-Control-Allow-Origin`。原先 `handleHttp()` 的 OPTIONS 预检与 `respondJson()`（所有 JSON 响应的公共出口）都回 `*`，等于把「本机任意网页可读走桥响应」变成默认。状态页与自身 `fetch` 同源、扩展只走 WebSocket，因此直接去掉通配而不是换成白名单。实测（起真实 `BridgeServer` + 假扩展客户端）：`/api/status`、`/api/command`、`OPTIONS` 三类响应头均无 ACAO/Allow-Methods，状态页 200 正常，且同一请求确实驱动扩展执行了 `nav`（证明这是真实可达面，不是空转）。
 
 - 修复 #8：settings 接线改为特性探测。`sctx.settings.register` 只存在于 dsh-settings 0.1.2-rc.1 及更早（实测 `0.1.2-rc.1` 的 `lib/index.js:281` 有 `register`，`0.1.7-rc.2` 与 `0.2.0-rc.2` 只导出 `SettingsForms`，方法为 `configure/describe/update/replace/mutate`）。原代码在注入回调里直接调用它，新宿主上抛 `TypeError`，回调后半段的 `controller.reconcile()` 与 `scope.watch()` 一起被跳过。现在：没有 `register` 就走 profile 配置并把设置页交给宿主的自动投影（`configure({auto:true})`），`register` 抛错也有兜底，两条路径都保证桥接收敛。三种宿主形状实测（假 settings 服务）：legacy / register-throws / no-register 全部「回调不抛、9777 监听、16 个工具注册」，且 legacy 路径的实时开关回归仍成立（改 false 端口关闭、改回 true 重开）。
