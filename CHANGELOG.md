@@ -1,5 +1,10 @@
 # 更新日志
 
+## Unreleased
+
+- 修复 #4：`cordis.patch.yml` 里写死的 `enabled: false` 覆盖了 v1.0.6 的 schema 默认值 `true`，导致 `dsh plugin add` 装完后 9777 无人监听、扩展报 `ERR_CONNECTION_REFUSED`。包内 patch 改为 `enabled: true`，实测（`Config({enabled:false,…}) → false`、`Config({enabled:true,…}) → true`）确认显式值优先于默认值，即该字段就是根因。
+- 文档：`README.md` / `README.en.md` / `SECURITY.md` / `docs/en/SECURITY.en.md` / `dsh-config/README.md` 里「默认关闭、设置页手动开启」的旧口径统一为「默认开启」；关开关的正确写法改为 profile 覆盖层按 `id` 覆盖 config（原文的 `~/.dsh/settings.yml` 与 `- merge:` 均非实际生效路径）。
+
 ## v1.0.7 (2026-09-04)
 
 - 新增：`browser_console_log` — 抓取页面 console.log/info/warn/error/debug；可按 level + regex 过滤，可 `clear:true` 清空。CDP 域 `Runtime.enable` 已在 attach 时常驻，不再 lazy。

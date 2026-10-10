@@ -114,7 +114,10 @@ dsh plugin --profile web remove @caob23/dsh-browser-control
 
 After installing and restarting, the bridge is on by default (v1.0.6+); no manual enable step. The status page at http://127.0.0.1:9777/ confirms the listener is up.
 
-> To opt out: set `enabled: false` under `browser-bridge.config` in `~/.dsh/settings.yml`.
+> To opt out: in your profile override layer `$DSH_HOME/profiles/<name>/cordis.patch.yml`, write
+> `- id: browser-bridge` with `config: { enabled: false }` (see [dsh-config/README.md](dsh-config/README.md)).
+> Do not change the in-package `cordis.patch.yml` back to `enabled: false` — that value overrides the
+> schema default and shows up as "nothing listens on 9777 after install" (issue #4).
 
 ### Option C: copy into the harness tree (legacy, v1.0.2 and earlier)
 

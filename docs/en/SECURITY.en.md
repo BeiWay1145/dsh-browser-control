@@ -19,7 +19,7 @@ The extension requests these Chrome permissions:
 - **Token authentication** — the extension must present the correct token to connect
 - **Local-only communication** — extension and bridge talk over WebSocket on localhost
 - **No data upload** — nothing is sent to any external server
-- **User control** — the plugin is off by default; enable it manually in dsh Settings
+- **User control** — since v1.0.6 the plugin is on by default and binds only to 127.0.0.1; set `enabled: false` in your profile override layer to turn it off
 - **Visibility** — Chrome shows its "is being debugged" banner during control; every action is visible on screen
 
 ## Known limitations

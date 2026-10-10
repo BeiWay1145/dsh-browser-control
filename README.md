@@ -113,7 +113,10 @@ dsh plugin --profile web remove @caob23/dsh-browser-control
 
 安装并重启后，桥接默认开启（v1.0.6+），不需要再去设置里手动启用。状态页 http://127.0.0.1:9777/ 可看到服务已监听。
 
-> 想关掉默认开启：在 `~/.dsh/settings.yml` 的 `browser-bridge.config` 下写 `enabled: false` 即可。
+> 想关掉默认开启：在你的 profile 覆盖层 `$DSH_HOME/profiles/<名字>/cordis.patch.yml` 里写
+> `- id: browser-bridge` + `config: { enabled: false }` 即可（写法见 [dsh-config/README.md](dsh-config/README.md)）。
+> 注意包内 `cordis.patch.yml` 里那份 `enabled: true` 不要改回 false —— 那会盖掉 schema 默认值，
+> 表现为装上后 9777 无人监听（issue #4）。
 
 ### 方式 C：复制进 harness 源码树（旧方式，v1.0.2 及以前）
 
@@ -193,7 +196,7 @@ Chrome 浏览器
 
 **关键设计：**
 - 扩展主动外连桥（不需要 native messaging host）
-- 默认关闭，设置页手动开启
+- 默认开启（v1.0.6+），装上即监听，不需要手动启用
 - 持久 debugger 附着——控制期间横幅始终显示
 - 仅监听 127.0.0.1，token 认证
 
