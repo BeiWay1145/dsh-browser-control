@@ -95,12 +95,40 @@ if (attachedTabs.has(tabId)) return;   // ← 脏缓存在此短路
 
 ### 修复
 
-见 commit `8494fcb`（已提 upstream PR #7）：
+见 commit `8494fcb` —— **upstream PR #7，已于 2026-10-12 合并（`854d7b9`）**：
 
 - 新增 `clearAttachment()`，不发 `chrome.debugger` 调用，故可在 `onDetach` 回调内安全执行
 - `onDetach` **无条件**失效缓存
 - `dbgSend` 识别 Chrome 的"会话丢失"措辞 → 失效缓存 + 抛 `code='cdp_detached'`
 - `withCDP` 捕获后**重新附着并重放一次**；二次失败原样抛出（最多两次尝试，不无限重试）
+
+#### ⚠️ 我第一版的"重放"写错了，被维护者实测证伪
+
+第一版的重放条件是「**整个闭包**重跑一次」。维护者指出：`cmdClick` 的闭包是
+`Runtime.evaluate(几何)` → `mouseMoved` → `mousePressed` → `mouseReleased`，
+若 detach 发生在 `mouseReleased`，重放会把**前三次已落地的调用再做一遍**。
+
+我用 `node:vm` + 打桩 `chrome.*` 驱动真 `withCDP` 复现，确认成立：
+
+| detach 注入点 | 我第一版 | 收紧后（**已合并**） |
+|---|---|---|
+| 第 1 次 `Runtime.evaluate` | attach=2 evaluate=2 mouse=3 | attach=2 evaluate=2 mouse=3 |
+| `mouseReleased`（第 4 次） | attach=2 evaluate=2 **mouse=6** ❌ | attach=1 evaluate=1 **mouse=3** ✅ |
+| 每次都失败 | attach=2 evaluate=2 | attach=2 evaluate=2（有界） |
+
+真实浏览器上那个 **mouse=6** 就是「多点一次」；`cmdInput` 的 `mode:'type'` 逐字符
+`insertText` 更糟，会把字符串**重复输入一半**。
+
+**收紧后的规则**：只在**闭包第一次 `send` 失败**时重放（那次失败意味着还没有任何
+副作用落地）；否则原样抛出，让上层作为**新命令**重新发起。
+
+**教训**：`withCDP` 的契约是「重试一次 CDP 调用」，不是「重试一次业务动作」——
+一个 `await` 序列只要超过一次 CDP 调用，就不再是幂等可重放的单位。
+
+**同时删掉了 `DETACHED_RE` 里的 `Cannot access a chrome-extension:// URL`**：
+它出自 `ensureAttached` 的 **attach** 阶段（实测报错前缀为 `debugger attach failed:`），
+而该正则只在 `dbgSend` 的 **send** 阶段被检查，位置放错了；且受限目标是永久拒绝，
+重放只会白费一轮。
 
 ### ⚠️ 对旧文档的修正
 
@@ -558,11 +586,17 @@ browser-use / chrome-devtools-mcp / chromedp / Selenium 等项目：
 
 | commit | 内容 | 是否已提 upstream |
 |---|---|---|
-| `8494fcb` | CDP 脱离缓存失效 + 自动重挂 | ✅ **PR #7** |
+| `8494fcb` | CDP 脱离缓存失效 + 自动重挂 | ✅ **PR #7 — 已于 2026-10-12 合并（`854d7b9`）** |
 | `b5fb106` | 焦点保全 + 标签摘要 + evaluate 超时透传 | ❌ 待定（行为变更需维护者拍板） |
-| `3e24c63` | 受限目标识别 + 结构化错误 + 文档 | ❌ 待定 |
+| `3e24c63` | 受限目标识别 + 结构化错误 + 文档 | ❌ 待定（上游 1.0.9 起有 `restricted` 相关处理，需比对） |
 | `8fd91a9` | 本文档 | — |
 | `bd85ae6` | P0 成本阶梯 + P1 `expect` 终态校验 | ❌ 待定 |
+
+> **PR #7 合并后被上游固化为 CI 守卫**：`verify/verify_cdp_retry.mjs` 断言
+> 「抢走会话后能重挂」「一次 click 只派发两次 `Input.dispatchMouseEvent`」
+> 「永久失败有界」，并已进 `npm run verify` 与 CI。
+> 我最初那版**闭包级重放**被维护者实测证伪（会重发已落地的副作用，实测 mouse 3→6），
+> 按他的方案收紧为**仅首次 `send` 失败才重放**后才合并 —— 详见 §1 与 PR #7 讨论。
 
 **本机部署状态**（截至本文档更新时）：
 

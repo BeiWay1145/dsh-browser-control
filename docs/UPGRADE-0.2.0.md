@@ -188,3 +188,76 @@ fork 侧回滚：`git checkout main`（本适配在 `feat/dsh-0.2.0` 分支）�
 |---|---|
 | §1 称 fork 目录 remote 指向上游 `caob23`，§4.1 要求复制新目录并改 remote | ❌ 已过期：该目录**早已是 fork**，`origin`=`BeiWay1145/dsh-browser-control`、`upstream`=`caob23/dsh-browser-control`。**无需复制新目录**，直接在其上开 `feat/dsh-0.2.0` 分支 |
 | §3 称 `settings.register` 未删除 | 🔴 见 §3，**已证伪** |
+
+---
+
+## 11. 实战踩坑（2026-10-12，DSH Desktop 已升到 2.0.17 / 内核 0.2.0-rc.2）
+
+升级**完成后**遇到过两次故障，根因不同，都记在这里。
+
+### 11.1 🔴 被 `file:` 引用的目录**不要**用来切分支 —— 曾因此进恢复模式
+
+**现象**：启动卡在恢复模式，唯一提示：
+
+```
+[dsh-plugin-desktop] profile package identity is invalid for @beiway1145/dsh-browser-control
+```
+
+**根因**：为提交上游 PR，在**被 profile `file:` 引用的那个目录**里执行了
+`git checkout fix/cdp-detach-cache`。该分支的 base 是上游 `2763148`，那时
+`package.json` 的 `name` 还是 `@caob23/dsh-browser-control`；于是：
+
+| 层 | 变成了 |
+|---|---|
+| profile `dependencies` 键 | `@beiway1145/dsh-browser-control`（不变） |
+| **实装副本 `package.json.name`** | **`@caob23/dsh-browser-control`**（切分支后没重装） |
+
+DSH Desktop **2.0.5+** 强制校验「依赖名 == 包实际 name」，不一致即进恢复模式。
+
+**真正的教训不是「记得重装」**（那条 §4.3 已写过，仍然踩了），而是：
+
+> **凡是被 `file:` 依赖引用的目录，都不要在里面切换分支或改 `package.json`。**
+> `file:` 是**拷贝**语义，源目录的任何状态变化都会让实装副本与 profile 声明脱节。
+
+**正确做法**：为 PR / 实验单独开 `git worktree` 或另建目录，让 profile 引用的那份保持在
+`main`。本次修复后已记入本节。
+
+### 11.2 ⚠️ `shotsDir` 默认值会落到 DSH 进程的 cwd —— 2.0.17 下是 `C:\Windows\system32`
+
+**现象**：`/api/status` 报 `shotsDir: C:\Windows\system32\dsh-browser-shots`。该目录
+**不存在**，即截图会静默失败（或需管理员权限）。
+
+**根因**：`shotsDir` 默认值是**相对路径** `dsh-browser-shots`，按**进程工作目录**解析。
+DSH Desktop 2.0.17 的 cwd 是 `C:\Windows\system32`。
+
+**修复**：在 profile `cordis.patch.yml` 里显式给绝对路径（已应用）：
+
+```yaml
+- id: browser-bridge
+  config:
+    enabled: true
+    shotsDir: C:/Users/BeiWay1145/.dsh/browser-shots
+```
+
+### 11.3 停用插件的正确方式（2.0.17 新增字段）
+
+2.0.17 的插件管理面板用 **`dsh.profile.desktopDeselectedBundles`** 表示「已停用」：
+把包名从 `bundles` 移出、加进该数组。它**不是**删除依赖，也不是改 `enabled`。
+
+排查恢复模式时**必须同时看这两处** —— 只看 `bundles` 会误判成「插件丢了」。
+
+> 本次故障是 11.1（身份不符，**真因**）与「用户为绕过恢复模式而停用」两件事叠加。
+> 身份修好后，把该包名从 `desktopDeselectedBundles` 移回 `bundles` 即恢复。
+
+### 11.4 上游已独立覆盖本 fork 的 0.2.0 适配
+
+上游 `1.0.9` 已自带：peer 放宽到 `^0.1.0 || ^0.2.0-rc.1`、settings 双路径兼容
+（`verify/verify_plugin.mjs` 覆盖 legacy / conflict / new 三种宿主形状），并新建了
+`verify/` 实测台与 CI。
+
+**本 fork 的 0.2.0 适配已与上游重叠**；唯一仍独立且有价值的上游贡献是
+**PR #7 的 CDP detach 修复**（已于 2026-10-12 合并为 `854d7b9`，并被固化为
+`verify/verify_cdp_retry.mjs` 的 CI 守卫）。
+
+**后续可考虑**：把 fork 的 `main` 重新对齐上游，只保留自己的增量，避免长期维护
+一份重复的适配代码。
