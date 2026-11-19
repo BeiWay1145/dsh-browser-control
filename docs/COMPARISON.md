@@ -1,6 +1,7 @@
 # 对比报告：本 fork / upstream / dsh-ego-browser
 
 > 生成日期：2026-09-19 · 实测环境：Edge 151 on Windows
+> 最后订正：2026-11-19（§4 由"要不要改包名"改写为"已完成改名"的记录）
 > 对比对象：
 > - **本 fork** `BeiWay1145/dsh-browser-control`（基于 upstream v1.0.7 + 8 个提交）
 > - **upstream** `caob23/dsh-browser-control` v1.0.7
@@ -156,80 +157,51 @@ b5fb106  feat: 焦点保全 + 标签摘要 + 超时透传
 
 ---
 
-## 4. 命名问题：要不要改包名？
+## 4. 包名：已完成改名（2026-10-06）
 
 ### 现状
 
-```
-package.json:  "name": "@caob23/dsh-browser-control"     ← 仍是上游的 scope
-profile 依赖:  "file:D:/VibeCoding/project/dsh-plugin/dsh-browser-control"
-```
+本 fork 已从上游 scope 改名为自己的 scope，**四层全部落地**：
 
-UI 显示 `@caob23/dsh-browser-control` 是**正确反映了 package.json 的 name 字段**，
-但该 name 指向的已不是它实际加载的代码（加载的是 fork 目录）。
-
-### 风险分析
-
-| 场景 | 用 `@caob23/...` | 改 `@beiway1145/...` |
-|---|---|---|
-| 与上游共存 | ❌ 包名冲突，pnpm 无法同时装两者 | ✅ 可共存对比 |
-| 发布到 npm | ❌ 无权限（非你的 scope） | ✅ 需先建 scope |
-| 与上游合并 | ✅ 差异清晰 | ⚠️ 需改回 |
-| 误以为装了原版 | ⚠️ 会困惑（正是当前的困惑） | ✅ 名实相符 |
-| 上游 PR 提交 | ✅ 无需改 | ⚠️ 需维护两个名字 |
-
-### 改名涉及的全部位置（已核实）
-
-共 **4 处**，缺一即加载失败：
-
-| # | 文件 | 当前值 | 说明 |
+| # | 位置 | 值 | 作用 |
 |---|---|---|---|
-| 1 | fork `package.json` → `name` | `@caob23/dsh-browser-control` | 包身份 |
-| 2 | fork `cordis.patch.yml` → `insert[0].name` | `'@caob23/dsh-browser-control'` | **Loader 的解析目标** |
-| 3 | profile `package.json` → `dependencies` 键 | `@caob23/dsh-browser-control` | pnpm 依赖键 |
-| 4 | profile `package.json` → `dsh.profile.bundles` 项 | `@caob23/dsh-browser-control` | bundle 注册名（必须是包名） |
+| 1 | `package.json` → `name` | `@beiway1145/dsh-browser-control` | 包身份 |
+| 2 | `cordis.patch.yml` → `insert[0].name` | `'@beiway1145/dsh-browser-control'` | **Loader 的解析目标** |
+| 3 | profile `package.json` → `dependencies` 键 | `"@beiway1145/dsh-browser-control": "file:…"` | pnpm 依赖键 |
+| 4 | profile `package.json` → `dsh.profile.bundles` 项 | `@beiway1145/dsh-browser-control` | bundle 注册名（必须是包名） |
 
-> ⚠️ 第 2 与第 4 项最容易漏。第 2 项是 Loader 实际解析的目标；
-> 第 4 项必须是**包名**而非目录名。
+> 第 2 与第 4 项最容易漏。第 2 项是 Loader 实际解析的目标；第 4 项必须是**包名**而非目录名。
+>
+> 本机可用状态可直接验证改名的效果：`profiles/desktop/node_modules/@beiway1145/` 下有且仅有
+> 实装副本，`@caob23/` 与 `@angelky7/` 目录都不存在。
 
-### 风险分析
-
-| 场景 | 保持 `@caob23/...` | 改为 `@beiway1145/...` |
-|---|---|---|
-| 与上游共存 | ❌ 包名冲突，pnpm 无法同时装 | ✅ 可共存对比 |
-| 发布到 npm | ❌ 无权限（非你的 scope） | ✅ 需先建 scope |
-| 与上游合并 / 提 PR | ✅ diff 干净 | ⚠️ 多出改名噪音，需排除 |
-| **UI 名实相符** | ❌ **会误以为装的是原版** | ✅ 相符 |
-
-### 我的建议：改
+### 为什么要改
 
 **决定性理由不是"好看"，而是这个误认本身就是真实故障源。**
 
-本轮之前发生过一次"插件层改动从未生效"的 bug：DSH 一直加载 npm 原版
-（46KB），而 fork 产物（69KB）未被使用，却因为 UI 显示 `@caob23/dsh-browser-control`
-而看不出来。改名能让这类问题**在 UI 上一眼可见**。
+改名之前发生过一次"插件层改动从未生效"的 bug：DSH 一直加载 npm 原版（46KB），
+而 fork 产物（69KB）未被使用，却因为 UI 显示 `@caob23/dsh-browser-control` 而看不出来。
+改名让这类问题**在 UI 上一眼可见**。
 
-**唯一代价**：若将来给上游提 PR，需把改名相关改动排除。考虑到 PR #7
-至今无回应、上游自 2026-09-04 停滞，这个代价很小。
+### 改名的三个已知代价
 
-### 若决定改，操作顺序
+1. **本目录不能再用来切分支**。profile 以 `file:` 引用这个目录（pnpm 是**拷贝**语义，不是软链）。
+   在这里切到含旧包名的分支，会改掉**实装副本**的 `name`，触发
+   `profile package identity is invalid` 恢复模式以免进不去 DSH。**PR 工作必须另开 worktree。**
+2. **不再是 npm 可直接安装的包**。`@beiway1145/dsh-browser-control` 未发布（registry 返回 404），
+   本机只能走 `file:` 路径安装。
+3. **与上游 PR 的 diff 里会多出改名噪音**，提交前需排除。
 
-```bash
-# 1) 改 fork 的两个文件
-#    package.json         name -> @beiway1145/dsh-browser-control
-#    cordis.patch.yml     insert[0].name -> @beiway1145/dsh-browser-control
-cd D:/VibeCoding/project/dsh-plugin/dsh-browser-control
-# （编辑后无需重新构建，这两个字段不参与打包）
-# 2) 改 profile
-cd ~/.dsh/profiles/desktop
-pnpm remove @caob23/dsh-browser-control
-pnpm add "file:D:/VibeCoding/project/dsh-plugin/dsh-browser-control"
-# 3) 手工把 dsh.profile.bundles 里的名字改成新包名
-# 4) 重启 DSH
-```
+### 为什么 README 里的 `@caob23/...` 故意不改
 
-> 注意：`pnpm add` 会把依赖键写成新包名，但 **`dsh.profile.bundles` 需要手工改**
-> —— pnpm 不感知该字段。
+`README.md` / `README.en.md` / `dsh-config/README.md` 里的安装命令指向
+`@caob23/dsh-browser-control`——那是 npm 上**真实存在**的包（v1.0.19）。
+这些命令描述的是"安装上游原版"，而本 fork 未发布到 npm，
+把命令改成 `@beiway1145/...` 只会把**能用的指令变成装不上的指令**。
+这三份文件同时是上游内容，本 fork 不擅自改动其安装指引。
+
+历史条目同理保留原样：`CHANGELOG.md`、`docs/PAIN-POINTS.md`、`docs/UPGRADE-0.2.0.md`
+里的旧 scope 记录的是当时确实叫 `@caob23`，是历史事实而非笔误。
 
 ---
 
